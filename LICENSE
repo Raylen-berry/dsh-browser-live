@@ -1,4 +1,4 @@
-MIT License
+﻿MIT License
 
 Copyright (c) 2026 Raylen-berry
 
@@ -20,14 +20,3 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
----
-
-Attribution / Acknowledgement
-This project is an independent, clean-room re-implementation whose design
-inspiration comes from dsh-ego-browser (https://github.com/Fisfzy/dsh-ego-browser),
-MIT License, Copyright (c) 2026 Fisfzy and dsh-ego-browser contributors.
-
-No source code from dsh-ego-browser or its vendored ego-lite runtime
-(Copyright CitroLabs / ego-lite contributors, MIT) is included in this
-repository; only the general concept and interaction model are referenced.
-Trademarks and names belong to their respective owners.

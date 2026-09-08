@@ -1,0 +1,21 @@
+dsh-browser-live
+Copyright (c) 2026 Raylen-berry
+SPDX-License-Identifier: MIT
+
+This product is an independent, clean-room re-implementation. It contains no
+source code from the projects below; it only references their concepts.
+
+Design inspiration — the capability set (agent-driven real browser + live
+watch-over panel with human takeover) was pioneered by:
+
+  dsh-ego-browser
+  Copyright (c) 2026 Fisfzy and dsh-ego-browser contributors
+  https://github.com/Fisfzy/dsh-ego-browser  (MIT License)
+
+which in turn vendors the ego-lite browser runtime:
+
+  ego-lite
+  Copyright CitroLabs / ego-lite contributors  (MIT License)
+
+Attribution is given out of respect for the original authors' work.
+Trademarks and product names belong to their respective owners.

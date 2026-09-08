@@ -93,3 +93,4 @@ dsh plugin --profile web add link:D:\DeepSeek\dsh-plugins\dsh-browser-live
   不携带其运行时 vendored 源码，仅借鉴其功能思路与交互范式。商标与名称归各自所有者。
 
 感谢 ego-browser 作者把"接进 DSH 的 agent 浏览器 + 观察窗"这条路趟通。
+完整署名与上游声明见仓库根目录 [`NOTICE`](./NOTICE) 文件。
