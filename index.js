@@ -1,11 +1,11 @@
 // ============================================================================
-// dsh-browser-live · Host half v0.2.0 —— 看得见的 Agent 浏览器（自研，不依赖 ego-lite）
+// dsh-browser-live · Host half v0.3.0 —— 看得见的 Agent 浏览器（自研，不依赖 ego-lite）
 //
 // 灵感来自 dsh-ego-browser (MIT, Fisfzy)：把"agent 驱动真实浏览器 + 人实时观察/接管"
 // 接进 DSH。区别在于本版**零裸 import**、零 vendored 运行时：
 //   · 浏览器 = 本机 Chrome/Edge/Brave，用 --remote-debugging-port 直连 CDP；
 //   · 登录态 = 持久 user-data-dir（$DSH_HOME/dsh-browser-live/chrome-profile）；
-//   · 工具 = 16 个 browser_* 结构化工具（快照/点击/输入/上传/滚动/等待/截图/标签页/下载…）；
+//   · 工具 = 17 个 browser_* 结构化工具（快照/点击/悬停轨迹/输入/上传/滚动/等待/截图/标签页/下载…）；
 //   · 观察窗 = host 侧 /bl/* SSE 帧流 + 前端 client.js 浮动面板（鼠标键盘直接接管）。
 //
 // 与 link: 安装的兼容性：@deepseek-ai/dsh-tools 的 defineTool 按 bg-atelier 找 sharp 的
@@ -31,7 +31,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 export const name = 'dsh-browser-live'
 export const inject = ['tools', 'webServer']
-export const version = '0.2.0'
+export const version = '0.3.0'
 
 // ---------------------------------------------------------------- utilities
 
@@ -88,6 +88,8 @@ const DEFAULT_SETTINGS = Object.freeze({
   chromePath: '',    // 空=自动探测
   extraArgs: '',     // 追加到 Chrome 命令行的空格分隔参数
   maxTabsWarn: 12,
+  humanize: true,    // agent 鼠标移动走拟人轨迹（贝塞尔+缓动+抖动）；接管面板的实时转发不受影响
+  humanSpeed: 1,     // 轨迹速度倍率（0.3~4）：越大越快越不像人，1≈0.25~0.45s 中等距离
 })
 
 let settings = { ...DEFAULT_SETTINGS }
@@ -106,6 +108,8 @@ function sanitizeSettings(raw) {
     if (typeof raw.windowSize === 'string' && /^\d{3,4},\d{3,4}$/.test(raw.windowSize.trim())) s.windowSize = raw.windowSize.trim()
     if (typeof raw.chromePath === 'string' && raw.chromePath.length < 512) s.chromePath = raw.chromePath
     if (typeof raw.extraArgs === 'string' && raw.extraArgs.length < 2000) s.extraArgs = raw.extraArgs
+    if (typeof raw.humanize === 'boolean') s.humanize = raw.humanize
+    if (Number.isFinite(raw.humanSpeed)) s.humanSpeed = clamp(raw.humanSpeed, 0.3, 4)
   }
   return s
 }
@@ -306,6 +310,7 @@ const browser = {
   downloads: [],      // {file, url, state, t}
   dying: false,
   WS: null,           // ws 包构造器（apply 时解析；null=退回全局 WebSocket）
+  lastPos: null,      // 拟人轨迹的"笔尖"：上一次鼠标落点 {x,y}（CSS px）
 }
 
 async function probePort(port) {
@@ -533,7 +538,7 @@ var t=null;
 if(kind==="ref"){t=searchNear(window.__BL_REFS&&window.__BL_REFS[key])}
 else if(kind==="selector"){t=searchNear(document.querySelector(key))}
 if(!t&&all.length){t=all.filter(vis)[0]||all[0]}
-if(!t)return {error:"页面没有 <input type=file>（可能是纯 DnD 上传区，v0.2 未支持）",count:0}
+if(!t)return {error:"页面没有 <input type=file>（可能是纯 DnD 上传区，未支持）",count:0}
 t.setAttribute("data-bl-up","1");
 var cur="";try{cur=Array.prototype.slice.call(t.files).map(function(f){return f.name}).join(",")}catch(e){}
 return {ok:true,count:all.length,matched:all.indexOf(t),multiple:!!t.multiple,accept:t.accept||"",current:cur,via:kind==="none"?"auto":kind};
@@ -559,11 +564,62 @@ async function dispatchMouse(tab, type, x, y, opts = {}) {
   await browser.cdp.send('Input.dispatchMouseEvent', params, tab.sessionId)
 }
 
-async function clickXY(tab, x, y, { button = 'left', clicks = 1 } = {}) {
+// ------------------------------------------------------------- 拟人鼠标轨迹
+// 人手动标的特征：① 非直线（先快后慢的弧线）② 两端慢中间快（缓动）
+// ③ 垂直方向的低频抖动（越接近目标越小）④ 偶发微停顿。
+// 用三次贝塞尔 + easeInOut + 随进度衰减的正视抖动 + 步间随机/偶发停顿建模。
+// instant=true（如接管面板的实时转发）时退回单点直达，绝不多插帧拖慢手感。
+
+function lerp(a, b, t) { return a + (b - a) * t }
+function easeInOut(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2 }
+
+async function humanMove(tab, toX, toY, { instant = false, steps, button = 'none' } = {}) {
+  const from = browser.lastPos || { x: Math.round(browser.meta.vw / 2), y: Math.round(browser.meta.vh / 2) }
+  const dx = toX - from.x, dy = toY - from.y
+  const dist = Math.hypot(dx, dy)
+  if (instant || !settings.humanize || dist < 6) {
+    await dispatchMouse(tab, 'mouseMoved', toX, toY, { button, buttons: button === 'none' ? 0 : 1 })
+    browser.lastPos = { x: toX, y: toY }
+    return { moved: true, interpolated: false, dist: Math.round(dist) }
+  }
+  // 距离越远步数越多，夹在 8~26；垂直振幅随距离增长但封顶，且终点收敛到 ~1px
+  const n = steps || clamp(Math.round(dist / 22) + 6, 8, 26)
+  const amp = clamp(dist * 0.16, 6, 46)
+  // 弧顶侧向偏移的随机符号，让每次轨迹略有不同
+  const sgn = Math.random() < 0.5 ? -1 : 1
+  // 两次"犹豫"停顿的插入位置（相对步序号）
+  const pauseAt = Math.random() < 0.5 ? Math.floor(n * (0.4 + Math.random() * 0.3)) : -1
+  // 三个抖动频率，制造低频摆动而非高频噪声
+  const f1 = 1 + Math.random() * 2, f2 = 2 + Math.random() * 3
+  for (let i = 1; i <= n; i++) {
+    const t = i / n
+    const e = easeInOut(t)
+    // 沿直线的基础位置
+    let x = lerp(from.x, toX, e)
+    let y = lerp(from.y, toY, e)
+    // 垂直方向 (−dy,dx)/dist，正弦×钟形包络(两端→0)叠加正弦 → 自然蛇形，终点精确收敛
+    const nx = -dy / dist, ny = dx / dist
+    const env = Math.sin(Math.PI * t)                    // 钟形：两端 0、中间 1
+    const wig = Math.sin(t * Math.PI * f1) * 0.7 + Math.sin(t * Math.PI * f2 + 1) * 0.3
+    const off = sgn * amp * env * wig
+    x += nx * off
+    y += ny * off
+    // 最后一步强制精确落点
+    if (i === n) { x = toX; y = toY }
+    await dispatchMouse(tab, 'mouseMoved', x, y, { button, buttons: button === 'none' ? 0 : 1 })
+    let d = 8 + Math.random() * 8 + (1 - env) * 6
+    if (i === pauseAt) d += 60 + Math.random() * 90
+    await sleep(d)
+  }
+  browser.lastPos = { x: toX, y: toY }
+  return { moved: true, interpolated: true, steps: n, dist: Math.round(dist) }
+}
+
+async function clickXY(tab, x, y, { button = 'left', clicks = 1, instant = false } = {}) {
   const buttons = button === 'right' ? 2 : button === 'middle' ? 4 : 1
-  await dispatchMouse(tab, 'mouseMoved', x, y)
+  await humanMove(tab, x, y, { instant })
   await dispatchMouse(tab, 'mousePressed', x, y, { button, clickCount: clicks, buttons })
-  await sleep(40)
+  await sleep(35 + Math.random() * 35)
   await dispatchMouse(tab, 'mouseReleased', x, y, { button, clickCount: clicks, buttons: 0 })
 }
 
@@ -720,6 +776,7 @@ function buildTools(t) {
       y: { type: 'number', description: '页面 CSS 纵坐标' },
       button: { type: 'string', description: 'left(默认)/right/middle' },
       double: { type: 'boolean', description: 'true=双击' },
+      instant: { type: 'boolean', description: 'true=鼠标瞬移过去（默认走拟人轨迹）' },
     },
     async execute(args) {
       const tab = await selectedTab()
@@ -727,11 +784,33 @@ function buildTools(t) {
       if (args.ref != null && args.ref !== '') { const r = await callOnPage(tab, REF_CENTER_FN, [String(args.ref)]); if (r.error) return r; x = r.x; y = r.y }
       else if (args.selector) { const r = await callOnPage(tab, SELECTOR_CENTER_FN, [String(args.selector)]); if (r.error) return r; x = r.x; y = r.y }
       if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error('需要 ref / selector / x+y 三者之一')
-      await clickXY(tab, x, y, { button: args.button, clicks: args.double ? 2 : 1 })
+      await clickXY(tab, x, y, { button: args.button, clicks: args.double ? 2 : 1, instant: !!args.instant })
       await sleep(250) // 让点击触发的跳转/重绘先起飞
       await refreshTabs()
       const cur = browser.tabs.find((z) => z.targetId === browser.selected)
       return { ok: true, at: [x, y], url: cur?.url, title: cur?.title }
+    },
+  }))
+
+  tools.push(t({
+    name: 'browser_move',
+    description: '把鼠标移到目标处（默认走拟人轨迹）：触发 :hover、下拉菜单、tooltip 用这个。ref/selector/坐标三选一；hold=true 按住左键移动（拖拽起手）；instant=true 瞬移跳过轨迹。',
+    parameters: {
+      ref: { type: 'string', description: 'browser_snapshot 元素编号' },
+      selector: { type: 'string', description: 'CSS 选择器' },
+      x: { type: 'number', description: '页面 CSS 横坐标' },
+      y: { type: 'number', description: '页面 CSS 纵坐标' },
+      hold: { type: 'boolean', description: 'true=按住左键移动（配合后续 click/release 场景）' },
+      instant: { type: 'boolean', description: 'true=瞬移（默认拟人）' },
+    },
+    async execute(args) {
+      const tab = await selectedTab()
+      let x = args.x, y = args.y
+      if (args.ref != null && args.ref !== '') { const r = await callOnPage(tab, REF_CENTER_FN, [String(args.ref)]); if (r.error) return r; x = r.x; y = r.y }
+      else if (args.selector) { const r = await callOnPage(tab, SELECTOR_CENTER_FN, [String(args.selector)]); if (r.error) return r; x = r.x; y = r.y }
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return { ok: false, error: '需要 ref / selector / x+y 三者之一' }
+      const m = await humanMove(tab, x, y, { instant: !!args.instant, button: args.hold ? 'left' : 'none' })
+      return { ok: true, at: [Math.round(x), Math.round(y)], path: m.interpolated ? 'humanized' : 'instant', steps: m.steps || 1, held: !!args.hold }
     },
   }))
 
@@ -1090,6 +1169,7 @@ export async function apply(ctx, config) {
               await clickXY(tab, Number(body.x) || 0, Number(body.y) || 0, {
                 button: kind === 'rclick' ? 'right' : 'left',
                 clicks: kind === 'dblclick' ? 2 : 1,
+                instant: true, // 接管=人的实时意图，直达，不插轨迹
               })
               break
             case 'move':

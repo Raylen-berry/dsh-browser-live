@@ -9,7 +9,7 @@
 ## 它解决什么
 
 DSH 内置的 web_search/web_fetch 只能"读"；凡是**必须真浏览器**的活（登录态、动态渲染、表单、验证码、
-需真人会话的站点）就干不了。装上本插件后，agent 获得 16 个 `browser_*` 工具，能真正在页面里
+需真人会话的站点）就干不了。装上本插件后，agent 获得 17 个 `browser_*` 工具，能真正在页面里
 点击、输入、提交、滚动、取快照；你在观察窗里实时看到每一步，卡在验证码时点进面板亲手代打，
 完事再把鼠标还给 agent。
 
@@ -17,7 +17,7 @@ DSH 内置的 web_search/web_fetch 只能"读"；凡是**必须真浏览器**的
 
 | 文件 | 职责 |
 |---|---|
-| `index.js` | Host（ESM）：拉起/接管 Chrome → CDP；注册 16 个 `browser_*` 工具；`/bl/*` 观察窗后端（SSE 帧流 + 输入回传 + 设置 + 下载取回） |
+| `index.js` | Host（ESM）：拉起/接管 Chrome → CDP；注册 17 个 `browser_*` 工具；`/bl/*` 观察窗后端（SSE 帧流 + 输入回传 + 设置 + 下载取回） |
 | `client.js` | Client 单文件：侧栏 🌐 按钮（无 slots 环境退化为自建浮球）+ 浮动观察窗（实时帧、标签条、agent 动作条、鼠标键盘接管、FPS/画质、下载快捷取回） |
 | `cordis.patch.yml` | bundle 装载声明（行 id == 包名，客户端模块扫描按 manifest name 匹配） |
 | `package.json` | `dsh.bundle.patch` + `dsh.client`（platform web，注入 runtime/ui-slots） |
@@ -37,7 +37,8 @@ dsh plugin --profile web add link:D:\DeepSeek\dsh-plugins\dsh-browser-live
 | `browser_open` | 启动/接管浏览器（懒启动），可选 url / newTab |
 | `browser_navigate` | 导航并等加载完成 |
 | `browser_snapshot` | 结构化快照：可见交互元素清单（ref 编号+坐标）+ 正文节选。**点击前先拿 ref** |
-| `browser_click` | ref / CSS selector / 坐标三选一，真实鼠标事件（右键、双击可选） |
+| `browser_click` | ref / CSS selector / 坐标三选一，真实鼠标事件（右键、双击可选）；**默认走拟人贝塞尔轨迹**（`instant:true` 可瞬移） |
+| `browser_move` | 拟人移动鼠标（触发 :hover/下拉/tooltip）；`hold` 按住左键、`instant` 瞬移 |
 | `browser_type` | 聚焦输入框（自动全选便于替换）+ 插入文本，可回车 |
 | `browser_upload` | 本机文件塞进 `<input type=file>`（不弹系统对话框）；ref/selector 可指上传按钮/拖拽区容器，自动解析其中隐藏 input（Meta Ads 等 React 自定义上传组件适用）；触发 change 事件 |
 | `browser_press` | 按键/组合键：`Enter`、`ctrl+a`、`alt+ArrowLeft`… |
@@ -52,6 +53,17 @@ dsh plugin --profile web add link:D:\DeepSeek\dsh-plugins\dsh-browser-live
 | `browser_close` | 关浏览器（profile 保留，登录态不丢） |
 
 所有工具串行互斥；首次调用自动拉起浏览器并弹观察窗。
+
+## 拟人轨迹（v0.3.0）
+
+agent 的鼠标移动（`browser_click` / `browser_move`）默认不再是"瞬移出现"：
+三次贝塞尔弧线 + 两端慢中间快的缓动 + 随进度衰减的正弦抖动 + 偶发微停顿，
+事件仍从 CDP 输入管线注入（`isTrusted === true`，与真鼠标同层）。
+
+- 设置项：`humanize`（默认 true，关掉回到瞬移）、`humanSpeed`（0.3~4，默认 1，约 0.15~0.45s/中程）。
+- 单点距离 < 6px 自动走直线，不做无意义插值。
+- **观察窗接管的实时输入不走插值**（你的手感必须即时），它本身就是真人轨迹。
+- 注意：插值只作用于**页面感知到的鼠标**，Windows 系统光标不会跟着动（OS 级注入是另一层，未做）。
 
 ## 观察窗
 
@@ -78,11 +90,12 @@ dsh plugin --profile web add link:D:\DeepSeek\dsh-plugins\dsh-browser-live
   这不是插件问题：宿主内正常运行不受影响；离线验证请用允许命名管道的会话跑
   `node 03-调试临时\bl-e2e.mjs`。
 
-## 已知边界（v0.2.0）
+## 已知边界（v0.3.0）
 
 - 观察窗单实例（整个宿主一个浏览器会话，不做多会话隔离）；多 agent 并发浏览请串行使用。
 - `Page.captureScreenshot` 取帧（非 screencast 事件流），高 FPS 下 CPU 开销线性上涨，默认 2fps。
 - `browser_upload` 支持 `<input type=file>`（含隐藏 input、React 自定义组件的 label 包裹）；纯 HTML5 拖拽（无 input）与跨 origin iframe 内交互未做。
+- 拟人轨迹 = 页面侧事件流仿真；**系统光标位置不动**，比对 `screenX` 与 OS 光标高阶风控理论上可辨（极少数场景）。
 - agent 靠 DOM 快照决策，"看不懂" Canvas 图表/图片内容——视觉闭环留 v1（DOM 为主、截图+视觉模型为辅）。
 
 ## 投放/运营场景模板（开箱即用）
