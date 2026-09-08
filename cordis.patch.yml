@@ -1,0 +1,5 @@
+# dsh-browser-live bundle patch: 挂载"看得见的 Agent 浏览器"宿主插件。
+# 行 id 必须等于包名（dsh 0.1.2 客户端模块扫描按 manifest name 匹配装载行名）。
+- insert:
+    - id: dsh-browser-live
+      name: 'dsh-browser-live'
