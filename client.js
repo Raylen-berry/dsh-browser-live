@@ -383,7 +383,7 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'bl-settings' },
         h('p', { style: { fontSize: 12.5, lineHeight: 1.8, margin: '2px 0 10px' } },
           '让 agent 驱动真实浏览器（本机 Chrome/Edge），你在右下角观察窗里实时可见、可直接接管。',
-          '共 15 个 browser_* 工具：open/navigate/snapshot/click/type/press/scroll/wait/eval/text/screenshot/tabs/history/downloads/close。',
+          '共 16 个 browser_* 工具：open/navigate/snapshot/click/type/upload/press/scroll/wait/eval/text/screenshot/tabs/history/downloads/close。',
           '登录态保存在 ' + '$DSH_HOME/dsh-browser-live/chrome-profile。'),
         h('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
           h('span', { className: 'bl-dot' + (state && state.alive ? ' on' : ''), style: { width: 9, height: 9 } }),

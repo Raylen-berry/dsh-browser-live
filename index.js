@@ -1,11 +1,11 @@
 // ============================================================================
-// dsh-browser-live · Host half v0.1.0 —— 看得见的 Agent 浏览器（自研，不依赖 ego-lite）
+// dsh-browser-live · Host half v0.2.0 —— 看得见的 Agent 浏览器（自研，不依赖 ego-lite）
 //
 // 灵感来自 dsh-ego-browser (MIT, Fisfzy)：把"agent 驱动真实浏览器 + 人实时观察/接管"
 // 接进 DSH。区别在于本版**零裸 import**、零 vendored 运行时：
 //   · 浏览器 = 本机 Chrome/Edge/Brave，用 --remote-debugging-port 直连 CDP；
 //   · 登录态 = 持久 user-data-dir（$DSH_HOME/dsh-browser-live/chrome-profile）；
-//   · 工具 = 15 个 browser_* 结构化工具（快照/点击/输入/滚动/等待/截图/标签页/下载…）；
+//   · 工具 = 16 个 browser_* 结构化工具（快照/点击/输入/上传/滚动/等待/截图/标签页/下载…）；
 //   · 观察窗 = host 侧 /bl/* SSE 帧流 + 前端 client.js 浮动面板（鼠标键盘直接接管）。
 //
 // 与 link: 安装的兼容性：@deepseek-ai/dsh-tools 的 defineTool 按 bg-atelier 找 sharp 的
@@ -31,6 +31,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 export const name = 'dsh-browser-live'
 export const inject = ['tools', 'webServer']
+export const version = '0.2.0'
 
 // ---------------------------------------------------------------- utilities
 
@@ -448,6 +449,7 @@ async function attachTab(tab) {
   const cdp = browser.cdp
   await cdp.send('Page.enable', {}, sessionId).catch(() => {})
   await cdp.send('Runtime.enable', {}, sessionId).catch(() => {})
+  await cdp.send('DOM.enable', {}, sessionId).catch(() => {})
   try { await cdp.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: DOWNLOADS_DIR(), eventsEnabled: true }, sessionId) } catch {}
   // 标签页 URL/标题变化 → 同步状态
   cdp.on('Page.javascriptDialogOpening', (p) => {
@@ -517,6 +519,25 @@ const REF_CENTER_FN = `function(id){var e=window.__BL_REFS&&window.__BL_REFS[id]
 const SELECTOR_CENTER_FN = `function(css){var e=document.querySelector(css);if(!e)return {error:"选择器没有命中元素"};e.scrollIntoView({block:"center",inline:"center"});var r=e.getBoundingClientRect();return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};}`
 
 const FOCUS_FN = `function(id){var e=window.__BL_REFS&&window.__BL_REFS[id];if(!e||!e.isConnected)return {error:"ref 失效，请重新 browser_snapshot"};e.scrollIntoView({block:"center",inline:"center"});e.focus();var tag=e.tagName.toLowerCase();if((tag==="input"||tag==="textarea")&&typeof e.select==="function"&&e.type!=="password"&&e.type!=="file"&&!e.readOnly)e.select();return {ok:true,tag:tag};}`
+
+// browser_upload 用：把"上传按钮/拖拽区/自定义 React 组件"解析成真正的 <input type=file>
+// 并打上 data-bl-up 标记（隐藏 input 也算——Meta 等后台的上传区多是 label/button 包着的隐藏 input）。
+// 返回 {ok,input:{...}} 或 {error,...}；找不到时返回页面上全部 file input 的候选清单供重试。
+const RESOLVE_FILE_INPUT_FN = `function(kind,key){
+function isFile(e){return e&&e.tagName==="INPUT"&&e.type==="file"}
+function searchNear(e){if(!e||!e.isConnected)return null;if(isFile(e))return e;var own=e.querySelector?e.querySelector("input[type=file]"):null;if(own)return own;var lab=e.closest?e.closest("label"):null;if(lab){var li=lab.querySelector?lab.querySelector("input[type=file]"):null;if(li)return li}var p=e;for(var i=0;i<4;i++){p=p&&p.parentElement;if(!p)break;if(isFile(p))return p;var q=p.querySelector?p.querySelector("input[type=file]"):null;if(q)return q}return null}
+function vis(e){var r=e.getBoundingClientRect();var s=window.getComputedStyle(e);return r.width>1&&r.height>1&&s.display!=="none"&&s.visibility!=="hidden"}
+document.querySelectorAll("input[data-bl-up]").forEach(function(n){n.removeAttribute("data-bl-up")});
+var all=Array.prototype.slice.call(document.querySelectorAll("input[type=file]"));
+var t=null;
+if(kind==="ref"){t=searchNear(window.__BL_REFS&&window.__BL_REFS[key])}
+else if(kind==="selector"){t=searchNear(document.querySelector(key))}
+if(!t&&all.length){t=all.filter(vis)[0]||all[0]}
+if(!t)return {error:"页面没有 <input type=file>（可能是纯 DnD 上传区，v0.2 未支持）",count:0}
+t.setAttribute("data-bl-up","1");
+var cur="";try{cur=Array.prototype.slice.call(t.files).map(function(f){return f.name}).join(",")}catch(e){}
+return {ok:true,count:all.length,matched:all.indexOf(t),multiple:!!t.multiple,accept:t.accept||"",current:cur,via:kind==="none"?"auto":kind};
+}`
 
 async function callOnPage(tab, functionDeclaration, args = []) {
   // Runtime.evaluate + IIFE 包装：函数源用模板字面量书写，参数逐个 JSON 转义，无手工括号失衡风险，
@@ -610,14 +631,18 @@ function makeTool(definer) {
       presentCall: (args) => ({ card: 'generic', title: tname, kind: 'other', rawInput: args }),
       async execute(args, exec) {
         return withLock(async () => {
-          if (!alive()) {
-            if (!autostart) return safeJson({ ok: false, error: '浏览器未运行' })
-            browser.panelWanted = true   // 冷启动才请求弹观察窗（客户端 ack 后清除）
-            await launch()
+          try {
+            if (!alive()) {
+              if (!autostart) return safeJson({ ok: false, error: '浏览器未运行' })
+              browser.panelWanted = true   // 冷启动才请求弹观察窗（客户端 ack 后清除）
+              await launch()
+            }
+            noteAction(tname + ' ' + brief(args))
+            const r = await execute(args, exec || {})
+            return typeof r === 'string' ? r : safeJson(r)
+          } catch (e) {
+            return safeJson({ ok: false, error: String(e?.message || e), note: '本次调用失败；若浏览器掉线会自动在下次调用重连，必要时先 browser_open' })
           }
-          noteAction(tname + ' ' + brief(args))
-          const r = await execute(args, exec || {})
-          return typeof r === 'string' ? r : safeJson(r)
         })
       },
     })
@@ -724,6 +749,44 @@ function buildTools(t) {
       await typeText(tab, String(args.text ?? ''), { enter: !!args.enter })
       await sleep(150)
       return { ok: true, typed: String(args.text ?? '').length, enter: !!args.enter }
+    },
+  }))
+
+  tools.push(t({
+    name: 'browser_upload',
+    description: '给页面文件上传控件塞入本机文件（CDP DOM.setFileInputFiles，不弹系统对话框）。ref/selector 可指上传按钮、拖拽区或自定义组件容器——自动解析其内部/label/祖先容器里的隐藏 <input type=file>（Meta Ads 等后台的 React 上传组件就是这么命中的）；不给则取页面第一个可见 file input。会触发页面 change/input 事件；大文件传完后用 browser_wait 等"上传完成/处理中"等状态文字。',
+    parameters: {
+      files: { type: 'array', required: true, items: { type: 'string' }, description: '要上传的本机文件绝对路径，JSON 数组（单个文件也要包一层数组，如 ["D:\\\\assets\\\\a.png"]）' },
+      ref: { type: 'string', description: 'browser_snapshot 元素编号（上传区非 input 也没关系）' },
+      selector: { type: 'string', description: 'CSS 选择器，指向上传区域' },
+    },
+    async execute(args) {
+      const tab = await selectedTab()
+      const raw = Array.isArray(args.files) ? args.files : (args.files ? [args.files] : [])
+      const abs = raw.map((f) => path.resolve(String(f))).filter(Boolean)
+      if (!abs.length) return { ok: false, error: 'files 为空' }
+      const missing = abs.filter((f) => !existsSync(f))
+      if (missing.length) return { ok: false, error: '文件不存在：' + missing.join(' , ') }
+      const kind = args.ref != null && args.ref !== '' ? 'ref' : (args.selector ? 'selector' : 'none')
+      const key = kind === 'ref' ? String(args.ref) : kind === 'selector' ? String(args.selector) : ''
+      const r = await callOnPage(tab, RESOLVE_FILE_INPUT_FN, [kind, key])
+      if (r.error) return r
+      if (abs.length > 1 && !r.multiple) return { ok: false, error: '该上传控件是单文件（multiple=false）：一次只传一个，或换多选上传区' }
+      const { root } = await browser.cdp.send('DOM.getDocument', {}, tab.sessionId)
+      const q = await browser.cdp.send('DOM.querySelector', { nodeId: root.nodeId, selector: 'input[data-bl-up]' }, tab.sessionId)
+      if (!q.nodeId) return { ok: false, error: '标记丢失（页面刚好重渲染了），重试 browser_upload' }
+      const setParams = { files: abs, ...(q.backendNodeId ? { backendNodeId: q.backendNodeId } : { nodeId: q.nodeId }) }
+      await browser.cdp.send('DOM.setFileInputFiles', setParams, tab.sessionId)
+      await evaluate(tab, 'document.querySelectorAll("input[data-bl-up]").forEach(function(n){n.removeAttribute("data-bl-up")})').catch(() => {})
+      return {
+        ok: true,
+        via: r.via,
+        input: { accept: r.accept, multiple: r.multiple, matched: r.matched, inputsOnPage: r.count, hadFiles: r.current || '' },
+        files: abs.map((f) => ({ name: path.basename(f), bytes: statSync(f).size })),
+        hint: abs.map((f) => path.basename(f)).join(',') === (r.current || '')
+          ? '⚠ 与控件现有文件同名，Chrome 可能不再触发 change（值未变）；如需强制重传，先刷新页面或换文件名'
+          : '已触发 change；上传耗时用 browser_wait(textContains=页面状态词) 等',
+      }
     },
   }))
 
@@ -985,7 +1048,8 @@ export async function apply(ctx, config) {
 
   const defineTool = await loadDefineTool()
   const t = makeTool(defineTool)
-  for (const tool of buildTools(t)) {
+  const builtTools = buildTools(t)
+  for (const tool of builtTools) {
     ctx.effect(() => ctx.tools.register(tool), `dsh-browser-live: ${tool.name} tool`)
   }
 
@@ -1114,5 +1178,5 @@ export async function apply(ctx, config) {
 
   process.on('exit', () => { try { if (browser.proc) browser.proc.kill() } catch {} try { browser.cdp?.close() } catch {} })
 
-  console.log('[dsh-browser-live] host up (v0.1.0) · 15 个 browser_* 工具已注册 · 数据目录 ' + BASE_DIR())
+  console.log('[dsh-browser-live] host up (v' + version + ') · ' + builtTools.length + ' 个 browser_* 工具已注册 · 数据目录 ' + BASE_DIR())
 }

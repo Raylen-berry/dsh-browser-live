@@ -9,7 +9,7 @@
 ## 它解决什么
 
 DSH 内置的 web_search/web_fetch 只能"读"；凡是**必须真浏览器**的活（登录态、动态渲染、表单、验证码、
-需真人会话的站点）就干不了。装上本插件后，agent 获得 15 个 `browser_*` 工具，能真正在页面里
+需真人会话的站点）就干不了。装上本插件后，agent 获得 16 个 `browser_*` 工具，能真正在页面里
 点击、输入、提交、滚动、取快照；你在观察窗里实时看到每一步，卡在验证码时点进面板亲手代打，
 完事再把鼠标还给 agent。
 
@@ -17,7 +17,7 @@ DSH 内置的 web_search/web_fetch 只能"读"；凡是**必须真浏览器**的
 
 | 文件 | 职责 |
 |---|---|
-| `index.js` | Host（ESM）：拉起/接管 Chrome → CDP；注册 15 个 `browser_*` 工具；`/bl/*` 观察窗后端（SSE 帧流 + 输入回传 + 设置 + 下载取回） |
+| `index.js` | Host（ESM）：拉起/接管 Chrome → CDP；注册 16 个 `browser_*` 工具；`/bl/*` 观察窗后端（SSE 帧流 + 输入回传 + 设置 + 下载取回） |
 | `client.js` | Client 单文件：侧栏 🌐 按钮（无 slots 环境退化为自建浮球）+ 浮动观察窗（实时帧、标签条、agent 动作条、鼠标键盘接管、FPS/画质、下载快捷取回） |
 | `cordis.patch.yml` | bundle 装载声明（行 id == 包名，客户端模块扫描按 manifest name 匹配） |
 | `package.json` | `dsh.bundle.patch` + `dsh.client`（platform web，注入 runtime/ui-slots） |
@@ -39,6 +39,7 @@ dsh plugin --profile web add link:D:\DeepSeek\dsh-plugins\dsh-browser-live
 | `browser_snapshot` | 结构化快照：可见交互元素清单（ref 编号+坐标）+ 正文节选。**点击前先拿 ref** |
 | `browser_click` | ref / CSS selector / 坐标三选一，真实鼠标事件（右键、双击可选） |
 | `browser_type` | 聚焦输入框（自动全选便于替换）+ 插入文本，可回车 |
+| `browser_upload` | 本机文件塞进 `<input type=file>`（不弹系统对话框）；ref/selector 可指上传按钮/拖拽区容器，自动解析其中隐藏 input（Meta Ads 等 React 自定义上传组件适用）；触发 change 事件 |
 | `browser_press` | 按键/组合键：`Enter`、`ctrl+a`、`alt+ArrowLeft`… |
 | `browser_scroll` | 滚轮方向+像素 |
 | `browser_wait` | 等文本出现 / 选择器命中 / URL 片段 / 纯等待，带超时 |
@@ -77,11 +78,32 @@ dsh plugin --profile web add link:D:\DeepSeek\dsh-plugins\dsh-browser-live
   这不是插件问题：宿主内正常运行不受影响；离线验证请用允许命名管道的会话跑
   `node 03-调试临时\bl-e2e.mjs`。
 
-## 已知边界（v0.1.0）
+## 已知边界（v0.2.0）
 
 - 观察窗单实例（整个宿主一个浏览器会话，不做多会话隔离）；多 agent 并发浏览请串行使用。
 - `Page.captureScreenshot` 取帧（非 screencast 事件流），高 FPS 下 CPU 开销线性上涨，默认 2fps。
-- 文件上传、跨 origin iframe 内点击、拖拽（HTML5 DnD）未做，留 v1 增强。
+- `browser_upload` 支持 `<input type=file>`（含隐藏 input、React 自定义组件的 label 包裹）；纯 HTML5 拖拽（无 input）与跨 origin iframe 内交互未做。
+- agent 靠 DOM 快照决策，"看不懂" Canvas 图表/图片内容——视觉闭环留 v1（DOM 为主、截图+视觉模型为辅）。
+
+## 投放/运营场景模板（开箱即用）
+
+把下面这些当 prompt 直接发给带本插件的 agent 即可；它们都遵循"只读→半自动→人工终审"的稳妥节奏。
+
+- **竞对情报（零风险，先跑这个）**
+  > 用 browser_open 打开 Meta 广告资料库，搜 "GoodNovel"，snapshot 后把近 7 天投放的
+  > 文案钩子 / 素材形式 / 起量日期 / 落地页 URL 抽成表格存成 csv。
+  公开数据、无登录墙、无风控。抽出的结构化数据可直接喂给 LLM 产素材变体。
+- **落地页巡检（真浏览器 + 真地区才有价值）**
+  > 依次用 `--window-size=390,844`（iPhone 视口）打开这几条落地页，每张存图并检查：
+  > 付费按钮是否存在、首章文案有无截断、深链是否 404、像素有无发起请求。
+  需要查地区差异时，在设置里给 `extraArgs` 填 `--proxy-server=http://<国家代理>` 再重启浏览器。
+- **半自动发布（人机协作，别全自动点 Publish）**
+  > 在 Ads Manager 建好 Ad Set（预算/国家/兴趣词/落地页），素材用 browser_upload 传入，
+  > 填完文案后**停在 Publish 前**，打开观察窗等我人工确认。
+  配合已装的 **dsh-approval-gate**：可配成 browser_click 默认放行、唯独命中 Publish 转人工审批。
+
+**风控纪律**：主账户只走"前端 UI 自动化"（等价真人点击）；`browser_eval` 打内部 GraphQL 取 JSON
+属于灰色地带，仅限**只读**且**用独立测试账户隔离**——"能拿到数据" ≠ "应该这么做"。Google Ads 对此更敏感。
 
 ## 许可与致谢
 
