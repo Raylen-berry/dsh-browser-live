@@ -81,9 +81,13 @@ agent 的鼠标移动（`browser_click` / `browser_move`）默认不再是"瞬�
 - **透明**：窗底一行"🤖 最近动作"，agent 每步工具调用都可见；标签条可点切换会话页。
 - **取回**：下载完成自动出现 ⬇ 链接，点了直接经 `/bl/download` 拿文件。
 - **不常驻**：agent 冷启动浏览器时自动弹一次；你主动 ✕ 收走后，本页生命周期内不再自动打扰。
-- **不挡路**（v0.4.1）：侧栏 🌐 与叠列地球钮是 `position:fixed` + 近上限 z-index，正常页面上必须
-  盖住侧栏才点得到；遇到**设置页开着**（本插件自己的 `settings.section` 挂载中）或页面上有
-  `role=dialog` / `aria-modal` 弹层时，浮球自动隐藏让位 —— 设置页里有「打开观察窗」按钮，入口不丢。
+- **不挡路**（v0.4.2）：侧栏 🌐 与叠列地球钮是 `position:fixed` + 近上限 z-index，正常页面上必须
+  盖住侧栏才点得到；设置页/对话框开着时它会**沉到那层遮罩底下**（不是消失）——和壁纸宝珠同一待遇：
+  宝珠没有任何特殊样式，它看着朦胧只是因为被设置页那层半透明 + `backdrop-filter` 的遮罩盖着。
+  做法：在浮球中心做一次 `elementsFromPoint`，取"盖住 ≥1/4 视口"的那个元素，沿祖先链找最大数值
+  z-index，浮球 z 设成它 − 1，同一层磨砂把它一起糊掉；弹层关掉自动浮回原层级。量不到遮罩层级时
+  （设置页不是带层级的固定遮罩那一类）退回**就地磨砂**：`opacity .3 + blur(2px)` 再垫一块自带
+  `backdrop-filter` 的小玻璃板，看着仍是一层影而不是硬压在内容上。
 
 ## 数据与隐私
 
@@ -102,7 +106,7 @@ agent 的鼠标移动（`browser_click` / `browser_move`）默认不再是"瞬�
   这不是插件问题：宿主内正常运行不受影响；离线验证请用允许命名管道的会话跑
   `node 03-调试临时\bl-e2e.mjs`。
 
-## 已知边界（v0.4.1）
+## 已知边界（v0.4.2）
 
 - 观察窗单实例（整个宿主一个浏览器会话，不做多会话隔离）；多 agent 并发浏览请串行使用
   （多个会话共用同一受控 Chrome 时会互相抢标签页，这是设计如此，不是 bug）。
@@ -136,6 +140,19 @@ agent 的鼠标移动（`browser_click` / `browser_move`）默认不再是"瞬�
 
 ## 版本与变更记录
 
+- v0.4.2：**浮球让位从"消失"改成"沉底"**（用户反馈 v0.4.1 隐藏的做法"效果还是很差"）
+  - 不再 `display:none`。改成量出盖住浮球那层的 z-index、把浮球降到它 − 1，于是浮球和壁纸宝珠
+    一起被设置页那层半透明 + `backdrop-filter` 的遮罩糊掉：位置不动、轮廓还在，只是沉在下面。
+  - 层级不用猜也不用写死：`overlayZAt()` 在浮球中心 `elementsFromPoint` → 跳过我们自己的元素 →
+    只认覆盖 ≥1/4 视口的层 → 沿祖先链取最大数值 `z-index`。遮罩撤掉后 `zIndex=''` 回到样式表基值。
+  - 兜底球（无 slots 环境）的 `position/z-index` 从行内样式搬进 `.bl-fab-fallback` 类 —— 否则
+    还原时把 `style.zIndex` 置空会把基值一起清没，浮球会真沉到侧栏底下去（这是改的过程中发现的）。
+  - 量不到层级时退回 `.bl-fab-ghost`：`opacity .3 + blur(2px) saturate(.7)` + 一块自带
+    `backdrop-filter` 的小玻璃板（`::before`），仍然是"一层影"，不会硬压在设置内容上。
+  - 验证：`03-调试临时\verify-bl-liveview.mjs` 16 项，含"沉底时 `display` 绝不能是 none"、
+    "z 变成 1999"、"量不到→ghost"、"关掉→全部还原"；另用真 Chrome 跑
+    `03-调试临时\bl-fab-sink-probe.html` 验证机制本身：命中链 `["#fab","#scrim","html"]` →
+    量到遮罩 2000 → 设 1999 后该点最上层变成 `#scrim`（浮球确实在磨砂之下），置空后回到 2147483049。
 - v0.4.1：**两个用户报回来的 bug**
   - **选了「独立网页」却掉回内嵌面板**：根因是客户端 `api()` 返回的是 `Response`，而
     `fetchSettings()` / `loadCfg()` 两处直接把它当设置对象读 —— `j.liveView` 恒为 `undefined`，
@@ -146,6 +163,7 @@ agent 的鼠标移动（`browser_click` / `browser_move`）默认不再是"瞬�
   - **左下角 🌐 浮在设置页之上**：叠列地球钮与兜底浮球都是 `position:fixed` + 近上限 z-index。
     新增 `fabShouldYield()/syncFabYield()`：设置页开着（以本插件 `settings.section` 挂载为信号）
     或页面有 `role=dialog`/`aria-modal` 弹层时隐藏浮球，弹层关掉自动回来。
+     （**这个"隐藏"在 v0.4.2 被"沉底"取代** —— 判断信号沿用，做法换了。）
   - 验证：`03-调试临时\verify-bl-liveview.mjs` 11 项真 React SSR + 假 DOM/假接口，覆盖"存着
     standalone 时设置页必须高亮独立网页"与"弹层开→浮球消失→弹层关→浮球回来"；另用
     `03-调试临时\make-bl-buggy.mjs` 复原旧写法跑同一测试，确认它**会红**（3 项 FAIL），

@@ -33,11 +33,17 @@ window.__ModuleLoader__.load({
 
     // ---------------------------------------------------------------- 样式
     var CSS = [
-      '.bl-fab{width:22px;height:22px;border-radius:50%;border:none;background:transparent;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;position:relative;font-size:15px;line-height:1;padding:0;flex:none}',
+      '.bl-fab{width:22px;height:22px;border-radius:50%;border:none;background:transparent;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;position:relative;font-size:15px;line-height:1;padding:0;flex:none;transition:opacity .3s ease,filter .3s ease}',
       '.bl-fab:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.16))}',
       '.bl-fab-dot{position:absolute;right:0;top:0;width:5px;height:5px;border-radius:50%;background:#3fb96f;box-shadow:0 0 4px rgba(63,185,111,.8)}',
       '.bl-fab-dot.bl-off{background:#b9bfc9;box-shadow:none}',
       '.bl-fab-stacked{position:fixed;z-index:2147483049}',
+      // 退路样式：量不到遮罩层级时，浮球仍留在顶层，但自己糊成一层磨砂影（小玻璃板 +
+      // backdrop-filter 把它身后的内容糊掉），看着像沉在下面，而不是硬邦邦压在上面。
+      '.bl-fab-ghost{opacity:.3;filter:blur(2px) saturate(.7);pointer-events:none}',
+      '.bl-fab-ghost::before{content:"";position:absolute;inset:-8px -8px -6px;border-radius:14px;background:rgba(20,18,26,.3);backdrop-filter:blur(7px) saturate(.9);box-shadow:inset 0 0 0 1px rgba(255,255,255,.08)}',
+      // 兜底球的层级也走样式表（不写行内）：让位时把 style.zIndex 置空才能回到基值
+      '.bl-fab-fallback{position:fixed;left:18px;bottom:18px;z-index:2147483050;box-shadow:0 6px 20px rgba(0,0,0,.22)}',
       '.bl-panel{position:fixed;right:18px;bottom:18px;z-index:2147483050;width:560px;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);background:var(--dsw-alias-bg-layer-2,#fff);border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.3));border-radius:14px;box-shadow:0 14px 44px rgba(0,0,0,.28);display:flex;flex-direction:column;overflow:hidden;font-size:12px;color:var(--dsw-alias-label-primary,#222)}',
       '.bl-panel.bl-wide{width:900px}',
       '.bl-panel.bl-snap{transition:left .16s ease,top .16s ease}',
@@ -475,19 +481,67 @@ window.__ModuleLoader__.load({
     var STACK_GAP = 5
     // 固定浮球（叠列地球钮 / 无 slots 时的兜底球）用的是近上限 z-index——正常页面上
     // 必须盖住侧栏才能点得到；但设置页/对话框开着时，它就压在人家的内容上了（用户反馈
-    // "左下角地图 UI 优先级太高，点开设置也能看到他"）。这里统一判定"该让位"，让位＝
-    // 隐藏：设置页里本来就有「打开观察窗」按钮，入口不会丢。
+    // "左下角地图 UI 优先级太高，点开设置也能看到他"）。
+    // v0.4.2 的让位不再是"消失"，而是**沉到遮罩底下**，跟壁纸宝珠同一待遇：宝珠没有任何
+    // 特殊样式，它看着朦胧只是因为 DSH 那层半透明 + backdrop-filter 的遮罩盖在它上面。
+    // 我们不知道、也不需要猜遮罩的层级：在浮球中心做一次 elementsFromPoint，挑出"盖住大片
+    // 视口"的那个元素，沿它的祖先链取最大数值 z-index，浮球 z 设成它 - 1 —— 同一层磨砂会把
+    // 浮球一起糊掉，观感与宝珠完全一致。量不到（没有这样的层 / 层级全是 auto）才退回就地磨砂。
+    var YIELD_COVER = 0.25   // 只有覆盖 ≥1/4 视口的层才算"遮罩"，普通控件不算
     function fabShouldYield() {
       if (S.settingsUi > 0) return true
       // 顺手覆盖其它弹层：DSH 若用 role/aria-modal 标记对话框，浮球一并让位（探不到就是
       // 没有，多一次 querySelector，600ms 一轮，代价可忽略）。
       try { return !!document.querySelector('[role="dialog"],[aria-modal="true"]') } catch (e) { return false }
     }
+    function overlayZAt(fab) {
+      try {
+        var r = fab.getBoundingClientRect()
+        if (!r.width) return 0
+        var hit = document.elementsFromPoint || document.mozElementsFromPoint
+        if (!hit) return 0
+        var list = hit.call(document, r.left + r.width / 2, r.top + r.height / 2) || []
+        var min = (window.innerWidth || 1280) * (window.innerHeight || 800) * YIELD_COVER
+        for (var i = 0; i < list.length; i++) {
+          var el = list[i]
+          if (!el || el.nodeType !== 1) continue
+          if (el === fab || el.contains(fab) || fab.contains(el)) continue
+          if (el.closest && el.closest('.bl-fab')) continue     // 我们自己的另一个浮球不算遮罩
+          var b = el.getBoundingClientRect()
+          if (b.width * b.height < min) continue
+          var best = 0
+          for (var n = el; n && n.nodeType === 1; n = n.parentElement) {
+            var z = parseInt(window.getComputedStyle(n).zIndex, 10)
+            if (z > best) best = z
+          }
+          if (best > 0) return best
+        }
+      } catch (e) { /* 量不动就当没有遮罩，走就地磨砂 */ }
+      return 0
+    }
+    function applyFabYield(fab) {
+      if (!fab || !fab.dataset) return
+      if (!fabShouldYield()) {
+        fab.style.zIndex = ''
+        fab.dataset.blYield = ''
+        if (fab.classList) fab.classList.remove('bl-fab-ghost')
+        return
+      }
+      var z = overlayZAt(fab)
+      if (z > 1) {
+        // 真的沉下去了：不加任何装饰性样式，朦胧感由那层遮罩的 backdrop-filter 提供
+        fab.style.zIndex = String(z - 1)
+        fab.dataset.blYield = 'sunk'
+        if (fab.classList) fab.classList.remove('bl-fab-ghost')
+      } else {
+        fab.style.zIndex = ''
+        fab.dataset.blYield = 'ghost'
+        if (fab.classList) fab.classList.add('bl-fab-ghost')
+      }
+    }
     function syncFabYield() {
-      var disp = fabShouldYield() ? 'none' : ''
-      if (S.stackedFab) S.stackedFab.style.display = disp
-      var fb = document.getElementById('bl-fab-fallback')
-      if (fb) fb.style.display = disp
+      applyFabYield(S.stackedFab)
+      applyFabYield(document.getElementById('bl-fab-fallback'))
     }
     function stackedPossible() { return !!document.querySelector('.bga-orb') }
     function stackDotTick() {
@@ -554,9 +608,10 @@ window.__ModuleLoader__.load({
         orb.style.setProperty('--bga-orb-dy', dy.toFixed(2) + 'px')
         orb.style.setProperty('--bga-orb-dx', dx.toFixed(2) + 'px')
 
-        fab.style.display = fabShouldYield() ? 'none' : ''
+        fab.style.display = ''
         fab.style.left = Math.round(cx0 + dx - STACK_FAB / 2) + 'px'
         fab.style.top = Math.round(Math.max(4, fabTop)) + 'px'
+        applyFabYield(fab)   // 位置定了再判让位：要让位时得按新位置去量遮罩层级
         stackDotTick()
       } catch (e) {
         // 任何测量异常都不能吃掉地球钮：退回原生槽位显示
@@ -650,8 +705,9 @@ window.__ModuleLoader__.load({
       ensureStyles()
       var b = document.createElement('button')
       b.id = 'bl-fab-fallback'
-      b.className = 'bl-fab'
-      b.style.cssText = 'position:fixed;left:18px;bottom:18px;z-index:2147483050;box-shadow:0 6px 20px rgba(0,0,0,.22)'
+      // 位置与层级都放样式表（.bl-fab-fallback），不能写行内：让位时把 style.zIndex
+      // 置空要能回到基值，行内值一置没就真沉到侧栏底下去了。
+      b.className = 'bl-fab bl-fab-fallback'
       b.innerHTML = '🌐<span class="bl-fab-dot bl-off"></span>'
       b.title = '浏览器观察窗'
       b.addEventListener('click', togglePanel)
