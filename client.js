@@ -90,6 +90,7 @@ window.__ModuleLoader__.load({
       viewWin: null,       // 独立页窗口句柄
       stacked: false,      // 已叠到壁纸宝珠下（bg-atelier 共存模式）
       stackedFab: null,    // 叠列模式用的 fixed 地球钮
+      settingsUi: 0,       // >0 = 设置页开着（本插件的 settings.section 挂载中），固定浮球要让位
       es: null,
       poll: null,
       stopBtnArmed: false,
@@ -472,6 +473,22 @@ window.__ModuleLoader__.load({
     // （--bga-orb-dy/--bga-orb-dx，bg-atelier 侧只有被动 transform），几何单点归本插件。
     var STACK_FAB = 22  // 必须与 CSS .bl-fab 尺寸一致
     var STACK_GAP = 5
+    // 固定浮球（叠列地球钮 / 无 slots 时的兜底球）用的是近上限 z-index——正常页面上
+    // 必须盖住侧栏才能点得到；但设置页/对话框开着时，它就压在人家的内容上了（用户反馈
+    // "左下角地图 UI 优先级太高，点开设置也能看到他"）。这里统一判定"该让位"，让位＝
+    // 隐藏：设置页里本来就有「打开观察窗」按钮，入口不会丢。
+    function fabShouldYield() {
+      if (S.settingsUi > 0) return true
+      // 顺手覆盖其它弹层：DSH 若用 role/aria-modal 标记对话框，浮球一并让位（探不到就是
+      // 没有，多一次 querySelector，600ms 一轮，代价可忽略）。
+      try { return !!document.querySelector('[role="dialog"],[aria-modal="true"]') } catch (e) { return false }
+    }
+    function syncFabYield() {
+      var disp = fabShouldYield() ? 'none' : ''
+      if (S.stackedFab) S.stackedFab.style.display = disp
+      var fb = document.getElementById('bl-fab-fallback')
+      if (fb) fb.style.display = disp
+    }
     function stackedPossible() { return !!document.querySelector('.bga-orb') }
     function stackDotTick() {
       if (S.stackedFab) {
@@ -495,6 +512,7 @@ window.__ModuleLoader__.load({
     }
     function stackedTick() {
       try {
+        syncFabYield()
         var orb = document.querySelector('.bga-orb')
         if (!orb) {
           S.stacked = false
@@ -536,7 +554,7 @@ window.__ModuleLoader__.load({
         orb.style.setProperty('--bga-orb-dy', dy.toFixed(2) + 'px')
         orb.style.setProperty('--bga-orb-dx', dx.toFixed(2) + 'px')
 
-        fab.style.display = ''
+        fab.style.display = fabShouldYield() ? 'none' : ''
         fab.style.left = Math.round(cx0 + dx - STACK_FAB / 2) + 'px'
         fab.style.top = Math.round(Math.max(4, fabTop)) + 'px'
         stackDotTick()
@@ -570,10 +588,30 @@ window.__ModuleLoader__.load({
       } catch (e) { return false }
     }
     function fetchSettings() {
-      return api('/bl/settings.json').then(function (j) {
-        if (j && typeof j === 'object') { S.liveView = j.liveView === 'standalone'; return j }
-        return null
-      }).catch(function () { return null })
+      // api() 给的是 Response 不是 JSON —— v0.4.0 这里漏了 .json()，j.liveView 恒为
+      // undefined，于是盘上存着 standalone、页面里 S.liveView 仍是 false：地球钮又
+      // 弹回内嵌面板。v0.4.1 修回（顺带 no-store，宿主本就发 no-store，双保险）。
+      return api('/bl/settings.json', { cache: 'no-store' })
+        .then(function (r) { return r && r.ok ? r.json() : null })
+        .then(function (j) {
+          if (j && typeof j === 'object') { S.liveView = j.liveView === 'standalone'; return j }
+          return null
+        }).catch(function () { return null })
+    }
+
+    // 切形态要立刻把手上的窗口交接过去，不用退出重进：
+    // 独立网页 = 收掉内嵌面板、正在看的话弹出 /bl/view（被拦弹窗则保留面板）；
+    // 内嵌面板 = 关掉独立页、正在看的话显示面板。
+    function applyLiveView() {
+      var watching = S.open || !!(S.viewWin && !S.viewWin.closed)
+      if (S.liveView) {
+        var opened = !watching || openStandalone()
+        if (opened && S.open) hidePanel(false)
+      } else {
+        if (S.viewWin && !S.viewWin.closed) { try { S.viewWin.close() } catch (e) {} }
+        S.viewWin = null
+        if (watching) showPanel(true)
+      }
     }
 
     function showPanel(userInitiated) {
@@ -621,6 +659,7 @@ window.__ModuleLoader__.load({
       setInterval(function () {
         var dot = b.querySelector('.bl-fab-dot')
         if (dot) dot.classList.toggle('bl-off', !(S.state && S.state.alive))
+        syncFabYield()   // 兜底球也是 fixed 近上限层级，弹层开着照样要让位
       }, 3000)
     }
 
@@ -641,24 +680,33 @@ window.__ModuleLoader__.load({
       var isFilled = filled[0], setFilled = filled[1]
 
       function loadCfg() {
-        api('/bl/settings.json').then(function (j) {
+        // 同上：Response 要先 .json()，否则 cfg 是个 Response 对象、cfg.liveView 恒
+        // undefined，设置页每次重进都高亮「内嵌面板」。
+        api('/bl/settings.json', { cache: 'no-store' }).then(function (r) { return r && r.ok ? r.json() : null }).then(function (j) {
           if (!j || typeof j !== 'object') return
           setCfg(j)
+          S.liveView = j.liveView === 'standalone'
           if (!isFilled) { setProxy(j.proxy || ''); setExtra(j.extraArgs || ''); setFilled(true) }
         })
       }
       React.useEffect(function () {
+        S.settingsUi++
+        syncFabYield()
         var t
         var tick = function () { api('/bl/ping').then(function (r) { return r && r.ok ? r.json() : null }).then(function (j) { if (j) setState(j) }) }
         tick(); loadCfg()
         t = setInterval(tick, 4000)
-        return function () { clearInterval(t) }
+        return function () { clearInterval(t); S.settingsUi--; syncFabYield() }
       }, [])
       function put(patch, msg) {
         fetch('/bl/settings.json', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(patch) })
           .then(function (r) { return r.json() })
           .then(function (j) {
-            if (j && j.settings) { setCfg(j.settings); S.liveView = j.settings.liveView === 'standalone' }
+            if (j && j.settings) {
+              setCfg(j.settings)
+              var next = j.settings.liveView === 'standalone'
+              if (next !== S.liveView) { S.liveView = next; applyLiveView() }
+            }
             setNote(msg || '已保存')
             setTimeout(function () { setNote('') }, 2600)
           }).catch(function () { setNote('保存失败') })
@@ -666,6 +714,8 @@ window.__ModuleLoader__.load({
       var lab = { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', width: 96, flex: 'none' }
       var box = { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }
       var inp = { flex: '1', minWidth: 160, fontSize: 12, padding: '4px 7px', borderRadius: 7, border: '1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.3))', background: 'transparent', color: 'inherit' }
+      // cfg 还在飞（首次渲染 null）时先拿 S.liveView 顶上，别让「内嵌面板」闪一下选中态
+      var lv = cfg ? cfg.liveView : (S.liveView ? 'standalone' : 'panel')
       return h('div', { className: 'bl-settings' },
         h('p', { style: { fontSize: 12.5, lineHeight: 1.8, margin: '2px 0 10px' } },
           '让 agent 驱动真实浏览器（本机 Chrome/Edge），你在观察窗里实时可见、可直接接管。',
@@ -677,8 +727,8 @@ window.__ModuleLoader__.load({
           h('button', { className: 'bl-btn', onClick: togglePanel }, (S.open || (S.viewWin && !S.viewWin.closed)) ? '收起/聚焦观察窗' : '打开观察窗')),
         h('div', { style: box },
           h('span', { style: lab }, '观察窗形态'),
-          h('button', { className: 'bl-btn' + (!cfg || cfg.liveView !== 'standalone' ? ' bl-on' : ''), onClick: function () { put({ liveView: 'panel' }, '已切回 DSH 内嵌面板') }, title: '在 DSH 右下角浮动面板里看' }, '内嵌面板'),
-          h('button', { className: 'bl-btn' + (cfg && cfg.liveView === 'standalone' ? ' bl-on' : ''), onClick: function () { put({ liveView: 'standalone' }, '已切换：独立网页（/bl/view）') }, title: '弹出独立网页，可拖到副屏、F11 全屏' }, '独立网页'),
+          h('button', { className: 'bl-btn' + (lv !== 'standalone' ? ' bl-on' : ''), onClick: function () { put({ liveView: 'panel' }, '已切回 DSH 内嵌面板') }, title: '在 DSH 右下角浮动面板里看' }, '内嵌面板'),
+          h('button', { className: 'bl-btn' + (lv === 'standalone' ? ' bl-on' : ''), onClick: function () { put({ liveView: 'standalone' }, '已切换：独立网页（/bl/view）') }, title: '弹出独立网页，可拖到副屏、F11 全屏' }, '独立网页'),
           h('span', { style: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' } }, '独立网页 = 新标签页里的全屏观察窗；面板标题栏的 ⧉ 也能随时弹出')),
         h('div', { style: box },
           h('span', { style: lab }, '代理服务器'),
