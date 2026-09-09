@@ -97,6 +97,7 @@ window.__ModuleLoader__.load({
       stacked: false,      // 已叠到壁纸宝珠下（bg-atelier 共存模式）
       stackedFab: null,    // 叠列模式用的 fixed 地球钮
       settingsUi: 0,       // >0 = 设置页开着（本插件的 settings.section 挂载中），固定浮球要让位
+      autoFolded: false,   // 因设置页开着而被收进独立页的那次面板（离开设置页时按需还原）
       es: null,
       poll: null,
       stopBtnArmed: false,
@@ -669,8 +670,26 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // 设置页打开时，把摊着的内嵌面板"收"进独立页：/bl/view 可以丢副屏、F11，与设置页互不
+    // 干扰。离开设置页时按需还原 —— 但你要是已经把独立页关了才还回面板，还开着就不动，
+    // 免得同一画面出现两份。弹窗被浏览器拦掉时（非用户手势有可能）不收，留着面板看。
+    function foldPanelToStandalone() {
+      if (!S.open) return
+      if (!openStandalone()) return
+      S.autoFolded = true
+      hidePanel(false)
+    }
+    function unfoldPanelIfNeeded() {
+      if (!S.autoFolded) return
+      S.autoFolded = false
+      var gone = !S.viewWin || S.viewWin.closed
+      if (gone && !S.open && Date.now() > S.hideUntil) showPanel(false)
+    }
+
     function showPanel(userInitiated) {
-      if (S.liveView && openStandalone()) {
+      // 两种情况走独立页：用户选了 standalone；或者**设置页正开着** —— 那块 560px 的窗
+      // 摊在设置页上就是把人家内容盖掉，收进 /bl/view 两边各看各的（v0.4.3 选的②）。
+      if ((S.liveView || S.settingsUi > 0) && openStandalone()) {
         if (userInitiated) { S.userClosed = false; S.hideUntil = 0 }
         return
       }
@@ -748,11 +767,12 @@ window.__ModuleLoader__.load({
       React.useEffect(function () {
         S.settingsUi++
         syncFabYield()
+        foldPanelToStandalone()   // 面板摊着就收进独立页，别盖住设置内容（v0.4.3）
         var t
         var tick = function () { api('/bl/ping').then(function (r) { return r && r.ok ? r.json() : null }).then(function (j) { if (j) setState(j) }) }
         tick(); loadCfg()
         t = setInterval(tick, 4000)
-        return function () { clearInterval(t); S.settingsUi--; syncFabYield() }
+        return function () { clearInterval(t); S.settingsUi--; syncFabYield(); unfoldPanelIfNeeded() }
       }, [])
       function put(patch, msg) {
         fetch('/bl/settings.json', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(patch) })

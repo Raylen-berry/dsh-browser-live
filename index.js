@@ -32,7 +32,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 export const name = 'dsh-browser-live'
 export const inject = ['tools', 'webServer']
-export const version = '0.4.2'
+export const version = '0.4.3'
 
 // ---------------------------------------------------------------- utilities
 
