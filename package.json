@@ -1,7 +1,7 @@
 {
   "name": "dsh-browser-live",
-  "version": "0.3.0",
-  "description": "看得见的 Agent 浏览器（自研，零外部依赖）：17 个 browser_* 工具直接驱动本机 Chrome/Edge（CDP，含拟人鼠标轨迹），右下角实时观察窗直播页面并支持鼠标键盘接管；登录态持久化在 $DSH_HOME/dsh-browser-live。设计灵感来自 dsh-ego-browser (MIT)。",
+  "version": "0.4.0",
+  "description": "看得见的 Agent 浏览器（自研，零外部依赖）：17 个 browser_* 工具直接驱动本机 Chrome/Edge（CDP，含拟人鼠标轨迹），实时观察窗支持内嵌面板与独立网页（/bl/view，可丢副屏/全屏）两种形态、鼠标键盘接管，可配代理与额外启动参数；登录态持久化在 $DSH_HOME/dsh-browser-live。设计灵感来自 dsh-ego-browser (MIT)。",
   "keywords": [
     "dsh",
     "dsh-plugin",

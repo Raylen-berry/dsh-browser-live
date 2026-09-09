@@ -17,8 +17,8 @@ DSH 内置的 web_search/web_fetch 只能"读"；凡是**必须真浏览器**的
 
 | 文件 | 职责 |
 |---|---|
-| `index.js` | Host（ESM）：拉起/接管 Chrome → CDP；注册 17 个 `browser_*` 工具；`/bl/*` 观察窗后端（SSE 帧流 + 输入回传 + 设置 + 下载取回） |
-| `client.js` | Client 单文件：侧栏 🌐 按钮（无 slots 环境退化为自建浮球）+ 浮动观察窗（实时帧、标签条、agent 动作条、鼠标键盘接管、FPS/画质、下载快捷取回） |
+| `index.js` | Host（ESM）：拉起/接管 Chrome → CDP；注册 17 个 `browser_*` 工具；`/bl/*` 观察窗后端（SSE 帧流 + 输入回传 + 设置/代理 + 下载取回 + `/bl/view` 独立网页） |
+| `client.js` | Client 单文件：侧栏 🌐 按钮（无 slots 环境退化为自建浮球；与 bg-atelier 宝珠叠列共存）+ 观察窗（实时帧、标签条、agent 动作条、鼠标键盘接管、FPS/画质、下载取回；内嵌面板可拖动贴边，或切成独立网页） |
 | `cordis.patch.yml` | bundle 装载声明（行 id == 包名，客户端模块扫描按 manifest name 匹配） |
 | `package.json` | `dsh.bundle.patch` + `dsh.client`（platform web，注入 runtime/ui-slots） |
 
@@ -67,11 +67,20 @@ agent 的鼠标移动（`browser_click` / `browser_move`）默认不再是"瞬�
 
 ## 观察窗
 
+两种形态（设置页「观察窗形态」可切换，面板标题栏 ⧉ 也能随时弹出独立页）：
+
+- **内嵌面板**：DSH 右下角浮动窗，可按住标题栏拖动、拖近边缘自动贴边、位置记忆在 localStorage；
+- **独立网页 `/bl/view`**：新标签/新窗口里的全屏观察窗，适合丢到副屏或 F11 盯着看；
+  选了这个形态后，🌐 与 agent 冷启动自动弹的都走独立页（浏览器拦弹窗时自动退回内嵌面板）。
+
+共同能力：
+
 - **直播**：`/bl/stream` SSE 推 JPEG 帧（FPS/画质在窗内可调）。
-- **接管**：面板里鼠标点击/滚轮/键盘 → `/bl/input` → CDP Input，作用在同一个页面上；
+- **接管**：窗里鼠标点击/滚轮/键盘 → `/bl/input` → CDP Input，作用在同一个页面上；
   坐标按 `vw/渲染宽` 等比映射，缩放窗格不会点偏。
 - **透明**：窗底一行"🤖 最近动作"，agent 每步工具调用都可见；标签条可点切换会话页。
 - **取回**：下载完成自动出现 ⬇ 链接，点了直接经 `/bl/download` 拿文件。
+- **不常驻**：agent 冷启动浏览器时自动弹一次；你主动 ✕ 收走后，本页生命周期内不再自动打扰。
 
 ## 数据与隐私
 
@@ -90,9 +99,12 @@ agent 的鼠标移动（`browser_click` / `browser_move`）默认不再是"瞬�
   这不是插件问题：宿主内正常运行不受影响；离线验证请用允许命名管道的会话跑
   `node 03-调试临时\bl-e2e.mjs`。
 
-## 已知边界（v0.3.0）
+## 已知边界（v0.4.0）
 
-- 观察窗单实例（整个宿主一个浏览器会话，不做多会话隔离）；多 agent 并发浏览请串行使用。
+- 观察窗单实例（整个宿主一个浏览器会话，不做多会话隔离）；多 agent 并发浏览请串行使用
+  （多个会话共用同一受控 Chrome 时会互相抢标签页，这是设计如此，不是 bug）。
+- 驱动的是插件自己拉起的 Chrome/Edge profile；**接管你日常浏览器**需要走扩展路线，
+  方案与分期见 `docs/PLAN-user-browser-takeover.md`（尚未实现，所以设置页里没有这个开关）。
 - `Page.captureScreenshot` 取帧（非 screencast 事件流），高 FPS 下 CPU 开销线性上涨，默认 2fps。
 - `browser_upload` 支持 `<input type=file>`（含隐藏 input、React 自定义组件的 label 包裹）；纯 HTML5 拖拽（无 input）与跨 origin iframe 内交互未做。
 - 拟人轨迹 = 页面侧事件流仿真；**系统光标位置不动**，比对 `screenX` 与 OS 光标高阶风控理论上可辨（极少数场景）。
@@ -109,7 +121,8 @@ agent 的鼠标移动（`browser_click` / `browser_move`）默认不再是"瞬�
 - **落地页巡检（真浏览器 + 真地区才有价值）**
   > 依次用 `--window-size=390,844`（iPhone 视口）打开这几条落地页，每张存图并检查：
   > 付费按钮是否存在、首章文案有无截断、深链是否 404、像素有无发起请求。
-  需要查地区差异时，在设置里给 `extraArgs` 填 `--proxy-server=http://<国家代理>` 再重启浏览器。
+  需要查地区差异时，在设置页「代理服务器」填 `http://<国家代理>`（或 `socks5://…`）——
+  它直接翻成 Chrome 的 `--proxy-server`，等价于以前往 `extraArgs` 里手写参数，下次拉起浏览器生效。
 - **半自动发布（人机协作，别全自动点 Publish）**
   > 在 Ads Manager 建好 Ad Set（预算/国家/兴趣词/落地页），素材用 browser_upload 传入，
   > 填完文案后**停在 Publish 前**，打开观察窗等我人工确认。

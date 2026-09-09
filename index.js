@@ -17,8 +17,9 @@
 //   GET  /bl/state             观察窗状态：标签页/当前页/最近动作/下载/是否请求打开面板
 //   GET  /bl/stream?fps&q      SSE：JPEG 帧 + 布局元数据（无查看者时零开销）
 //   POST /bl/input             面板鼠标/键盘/滚轮 → CDP Input（坐标=CSS px，前端已映射）
-//   GET  /bl/settings.json     读设置（fps/质量/无头/窗口/额外启动参数/Chrome 路径）
+//   GET  /bl/settings.json     读设置（fps/质量/无头/窗口/额外启动参数/Chrome 路径/代理/观察形态）
 //   PUT  /bl/settings.json     写设置
+//   GET  /bl/view              独立网页版观察窗（全屏/丢副屏用；liveView=standalone 时自动用它）
 //   GET  /bl/download?file=    取下载目录里的文件（attachment，路径严格校验）
 // ============================================================================
 
@@ -31,7 +32,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 export const name = 'dsh-browser-live'
 export const inject = ['tools', 'webServer']
-export const version = '0.3.0'
+export const version = '0.4.0'
 
 // ---------------------------------------------------------------- utilities
 
@@ -87,6 +88,8 @@ const DEFAULT_SETTINGS = Object.freeze({
   windowSize: '1440,900',
   chromePath: '',    // 空=自动探测
   extraArgs: '',     // 追加到 Chrome 命令行的空格分隔参数
+  proxy: '',         // Chrome --proxy-server，例 http://127.0.0.1:7890 / socks5://127.0.0.1:1080；空=跟随系统
+  liveView: 'panel', // panel=DSH 内嵌观察窗；standalone=独立网页 /bl/view（可丢到副屏/全屏）
   maxTabsWarn: 12,
   humanize: true,    // agent 鼠标移动走拟人轨迹（贝塞尔+缓动+抖动）；接管面板的实时转发不受影响
   humanSpeed: 1,     // 轨迹速度倍率（0.3~4）：越大越快越不像人，1≈0.25~0.45s 中等距离
@@ -108,6 +111,8 @@ function sanitizeSettings(raw) {
     if (typeof raw.windowSize === 'string' && /^\d{3,4},\d{3,4}$/.test(raw.windowSize.trim())) s.windowSize = raw.windowSize.trim()
     if (typeof raw.chromePath === 'string' && raw.chromePath.length < 512) s.chromePath = raw.chromePath
     if (typeof raw.extraArgs === 'string' && raw.extraArgs.length < 2000) s.extraArgs = raw.extraArgs
+    if (typeof raw.proxy === 'string' && raw.proxy.length < 512) s.proxy = raw.proxy.trim()
+    if (raw.liveView === 'standalone' || raw.liveView === 'panel') s.liveView = raw.liveView
     if (typeof raw.humanize === 'boolean') s.humanize = raw.humanize
     if (Number.isFinite(raw.humanSpeed)) s.humanSpeed = clamp(raw.humanSpeed, 0.3, 4)
   }
@@ -392,6 +397,8 @@ async function launch() {
     '--no-first-run', '--no-default-browser-check',
     '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows',
     `--window-size=${settings.windowSize}`,
+    // 代理：独立实例也走你指定的出口（http://host:port / socks5://host:port）；留空=跟随系统
+    ...(settings.proxy ? [`--proxy-server=${settings.proxy}`] : []),
     ...parseExtraArgs(settings.extraArgs),
     ...(settings.headless ? ['--headless=new'] : []),
     'about:blank',
@@ -1134,6 +1141,89 @@ export async function apply(ctx, config) {
 
   const webServer = ctx.get('webServer')
   const offs = []
+
+  // 独立网页版观察窗（liveView=standalone 或面板/地球钮的 ⧉ 按钮打开）：
+  // 同一套 /bl/* 接口的全屏页面，可拖到副屏、F11/⛶ 全屏，适合"看着 agent 干活"。
+  const VIEW_PAGE = [
+    '<!doctype html><html lang="zh"><head><meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width,initial-scale=1">',
+    '<title>浏览器观察窗</title><style>',
+    ':root{color-scheme:dark}',
+    'html,body{height:100%;margin:0}',
+    'body{background:#0d1117;color:#dfe6ef;font:13px/1.5 system-ui,"Segoe UI",sans-serif;display:flex;flex-direction:column}',
+    '#hd{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid #222a35;flex:none}',
+    '#ttl{font-weight:600;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+    '#url{color:#8b98a9;max-width:38%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px}',
+    '.dot{width:9px;height:9px;border-radius:50%;background:#b9bfc9;flex:none}',
+    '.dot.on{background:#3fb96f;box-shadow:0 0 7px rgba(63,185,111,.9)}',
+    '#tabs{display:none;gap:6px;padding:6px 10px;border-bottom:1px solid #222a35;overflow-x:auto;flex:none}',
+    '.tab{flex:none;max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border:1px solid #2b3542;background:#161c24;border-radius:7px;padding:3px 9px;cursor:pointer;color:inherit;font-size:12px}',
+    '.tab.sel{border-color:#5b8def;background:rgba(91,141,239,.16)}',
+    '#stage{position:relative;flex:1;min-height:0;background:#101418;display:flex;align-items:flex-start;justify-content:center;overflow:hidden;line-height:0}',
+    '#img{max-width:100%;max-height:100%;display:block;user-select:none;-webkit-user-drag:none}',
+    '#empty{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#8b98a9;line-height:1.7;text-align:center;padding:24px}',
+    '#act{position:absolute;left:12px;bottom:12px;right:12px;background:rgba(10,14,20,.75);border-radius:8px;padding:4px 10px;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none;opacity:0;transition:opacity .25s}',
+    '#act.show{opacity:1}',
+    '#ft{display:flex;align-items:center;gap:10px;padding:8px 12px;border-top:1px solid #222a35;flex-wrap:wrap;flex:none}',
+    'button{border:1px solid #2b3542;background:#161c24;color:inherit;border-radius:7px;height:26px;padding:0 10px;cursor:pointer;font-size:12px}',
+    'button:hover{border-color:#3b4757}',
+    'button.on{background:rgba(91,141,239,.18);border-color:#5b8def}',
+    'button.danger{color:#ff7b72;border-color:rgba(255,123,114,.4)}',
+    'select{border:1px solid #2b3542;background:#161c24;color:inherit;border-radius:6px;height:26px;font-size:12px}',
+    'label{color:#8b98a9;display:inline-flex;align-items:center;gap:5px}',
+    '#dl{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap}',
+    '#dl a{color:#7aa7e8;text-decoration:none;border:1px solid rgba(91,141,239,.4);border-radius:6px;padding:1px 8px;max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px}',
+    '#key{position:absolute;left:-9999px;width:1px;height:1px;opacity:0}',
+    '</style></head><body>',
+    '<div id="hd"><span class="dot" id="dot"></span><span id="ttl">浏览器观察窗</span><span id="url"></span>',
+    '<button id="rc" title="重连画面">⟳ 重连</button><button id="fs" title="全屏（丢副屏）">⛶ 全屏</button></div>',
+    '<div id="tabs"></div>',
+    '<div id="stage"><img id="img" alt="" draggable="false">',
+    '<div id="empty">等待 agent 打开浏览器…<br>在 DSH 里调用任意 browser_* 工具后，这里会实时显示画面</div>',
+    '<div id="act"></div><textarea id="key" spellcheck="false" autocomplete="off"></textarea></div>',
+    '<div id="ft"><button id="take">⌨ 接管:开</button>',
+    '<label>FPS <select id="fps"><option>1</option><option selected>2</option><option>4</option><option>8</option></select></label>',
+    '<label>画质 <select id="q"><option value="40">省流</option><option value="60" selected>默认</option><option value="80">高清</option></select></label>',
+    '<button id="stop" class="danger">⏹ 关浏览器</button><span id="dl"></span></div>',
+    '<script>',
+    '(function(){',
+    'var $=function(i){return document.getElementById(i)};',
+    'var img=$("img"),dot=$("dot"),ttl=$("ttl"),url=$("url"),tabs=$("tabs"),act=$("act"),empty=$("empty"),key=$("key"),dl=$("dl");',
+    'var vw=1280,takeOn=true,es=null,lastClick=0,stopArmed=false;',
+    'function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;"}[c]})}',
+    'function trim(u){return String(u||"").replace(/^https?:\\/\\//,"").slice(0,80)}',
+    'function post(p,o){return fetch(p,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(o||{})}).catch(function(){})}',
+    'function api(p){return fetch(p).then(function(r){return r.ok?r.json():null}).catch(function(){return null})}',
+    'function xy(ev){var r=img.getBoundingClientRect();if(!r.width)return null;var f=vw/r.width;return {x:Math.max(0,Math.round((ev.clientX-r.left)*f)),y:Math.max(0,Math.round((ev.clientY-r.top)*f))}}',
+    'function focusKey(){try{key.focus({preventScroll:true})}catch(e){}}',
+    'img.addEventListener("mousedown",function(ev){if(!takeOn||ev.button>2)return;ev.preventDefault();focusKey();var p=xy(ev);if(!p)return;var now=Date.now();var dbl=now-lastClick<350&&ev.button===0;lastClick=now;post("/bl/input",{kind:ev.button===2?"rclick":dbl?"dblclick":"click",x:p.x,y:p.y})});',
+    'img.addEventListener("contextmenu",function(ev){if(takeOn)ev.preventDefault()});',
+    'var mv=0;img.addEventListener("mousemove",function(ev){if(!takeOn)return;var now=Date.now();if(now-mv<90)return;mv=now;var p=xy(ev);if(p)post("/bl/input",{kind:"move",x:p.x,y:p.y})});',
+    '$("stage").addEventListener("wheel",function(ev){if(!takeOn)return;ev.preventDefault();var p=xy(ev);if(!p)return;post("/bl/input",{kind:"wheel",x:p.x,y:p.y,dx:Math.round(ev.deltaX),dy:Math.round(ev.deltaY)})},{passive:false});',
+    'var NAMED=["Enter","Tab","Escape","Backspace","Delete","ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Home","End","PageUp","PageDown","F1","F2","F3","F4","F5","F6","F7","F8","F9","F10","F11","F12"," ","Insert"];',
+    'key.addEventListener("keydown",function(ev){if(!takeOn)return;var c=[];if(ev.ctrlKey)c.push("ctrl");if(ev.altKey)c.push("alt");if(ev.metaKey)c.push("meta");if(ev.shiftKey&&(c.length||ev.key.indexOf("Arrow")===0||["Tab","Enter","Backspace","Delete"].indexOf(ev.key)>=0))c.push("shift");if(NAMED.indexOf(ev.key)>=0||c.length){ev.preventDefault();post("/bl/input",{kind:"key",keys:c.concat([ev.key===" "?"Space":ev.key]).join("+")})}});',
+    'key.addEventListener("beforeinput",function(ev){if(!takeOn)return;if(ev.inputType==="insertText"&&ev.data){ev.preventDefault();post("/bl/input",{kind:"text",text:ev.data})}});',
+    'key.addEventListener("compositionend",function(ev){if(takeOn&&ev.data)post("/bl/input",{kind:"text",text:ev.data})});',
+    'key.addEventListener("paste",function(ev){var t=(ev.clipboardData||window.clipboardData).getData("text");if(t){ev.preventDefault();post("/bl/input",{kind:"text",text:t})}});',
+    '$("take").addEventListener("click",function(){takeOn=!takeOn;this.textContent=takeOn?"⌨ 接管:开":"⌨ 接管:关";this.classList.toggle("on",takeOn)});',
+    '$("take").classList.add("on");',
+    '$("fps").addEventListener("change",function(){fetch("/bl/settings.json",{method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify({fps:Number(this.value)})})});',
+    '$("q").addEventListener("change",function(){fetch("/bl/settings.json",{method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify({quality:Number(this.value)})})});',
+    '$("stop").addEventListener("click",function(){var b=this;if(!stopArmed){stopArmed=true;b.textContent="再点一次确认关闭";setTimeout(function(){stopArmed=false;b.textContent="⏹ 关浏览器"},3000);return}stopArmed=false;b.textContent="⏹ 关浏览器";post("/bl/close-browser",{}).then(function(){setTimeout(poll,300)})});',
+    '$("rc").addEventListener("click",function(){open()});',
+    '$("fs").addEventListener("click",function(){if(document.fullscreenElement){document.exitFullscreen()}else if(document.documentElement.requestFullscreen){document.documentElement.requestFullscreen()}});',
+    'function open(){if(es){try{es.close()}catch(e){}}try{es=new EventSource("/bl/stream");es.addEventListener("frame",function(ev){var d;try{d=JSON.parse(ev.data)}catch(e){return}vw=d.vw||vw;img.src="data:image/jpeg;base64,"+d.img;empty.style.display="none";dot.classList.add("on");var t=String(d.title||"浏览器观察窗").slice(0,90);ttl.textContent=t;url.textContent=trim(d.url)});es.addEventListener("offline",function(){dot.classList.remove("on")});es.onerror=function(){}}catch(e){}}',
+    'function poll(){api("/bl/state").then(function(st){if(!st)return;dot.classList.toggle("on",!!st.alive);if(!st.alive){empty.style.display="flex";img.removeAttribute("src");ttl.textContent="浏览器观察窗";url.textContent=""}',
+    'var ts=st.tabs||[];tabs.style.display=ts.length>1?"flex":"none";tabs.innerHTML=ts.map(function(t){return \x27<button class="tab\x27+(t.selected?" sel":"")+\x27" data-i="\x27+t.i+\x27">\x27+esc(t.title||trim(t.url)||"(空白页)")+\x27</button>\x27}).join("");',
+    'var done=(st.downloads||[]).filter(function(d){return d.state==="done"}).slice(-3);dl.innerHTML=done.map(function(d){return \x27<a href="/bl/download?file=\x27+encodeURIComponent(d.file)+\x27" title="取回下载文件">⬇ \x27+esc(d.file)+\x27</a>\x27}).join("");',
+    'var la=st.lastAction||[];var last=la[la.length-1];if(last){act.textContent="🤖 "+last.label;act.classList.add("show")}',
+    'if(st.panelWanted)post("/bl/ack",{})})}',
+    'tabs.addEventListener("click",function(ev){var b=ev.target.closest?ev.target.closest(".tab"):null;if(!b)return;post("/bl/tabs",{action:"select",index:Number(b.getAttribute("data-i"))}).then(poll)});',
+    'open();poll();setInterval(poll,2500);',
+    '})();',
+    '</script></body></html>',
+  ].join('\n')
+
   if (webServer && typeof webServer.register === 'function') {
     offs.push(ctx.effect(() => webServer.register({
       kind: 'exact', path: '/bl/ping',
@@ -1204,6 +1294,14 @@ export async function apply(ctx, config) {
         sendJson(res, 405, { ok: false, error: 'method not allowed' })
       },
     }), 'bl: settings route'))
+    offs.push(ctx.effect(() => webServer.register({
+      kind: 'exact', path: '/bl/view',
+      handler: (req, res) => {
+        req.resume?.()
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+        res.end(VIEW_PAGE)
+      },
+    }), 'bl: view route'))
     offs.push(ctx.effect(() => webServer.register({
       kind: 'exact', path: '/bl/download',
       handler: (req, res) => {
