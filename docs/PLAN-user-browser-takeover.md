@@ -1,7 +1,17 @@
-# 方案：接管用户自己的 Chrome（扩展路线，未实现）
+# 方案：接管用户自己的浏览器（扩展路线）
 
-> 状态：**设计 + 排期，未写一行实现代码**。设置页里也就没有“接管我的浏览器”开关——
-> 放一个不工作的开关比不放更糟。等这条落地时，再在设置页加 `driveTarget: plugin | user-extension`。
+> **状态（2026-09-11 更新）：P0 + P1（输入接管）+ P2 的一部分已落地；v0.7.0 起 Chrome / Edge 可同时接入。**
+>
+> - **v0.6.0 / 扩展 v0.2.0**：P0（只读）+ P1（输入接管：点击/打字/按键/滚轮/上传，弹窗「允许操作」默认关）。
+> - **v0.7.0 / 扩展 v0.3.0**：**多浏览器**——桥支持同挂 N 条扩展连接、按 `<kind>:` 前缀路由；
+>   host 每浏览器一份会话；所有 `browser_*` 工具新增 `use`（`plugin`/`chrome`/`edge`/`user`/`auto`）；
+>   弹窗新增身份显示 +「允许当前所有标签页」+「撤销全部授权」。
+>   协议与实现实况见 [`MULTI-BROWSER.md`](./MULTI-BROWSER.md)（本文件保留原始设计与"为什么这么做"）。
+> - **仍未做**：下载接管（`chrome.downloads`，用户浏览器档的 `browser_downloads` 仍只列插件目录）、
+>   `evaluate` 收窄（换成固定脚本下发）、与 `dsh-approval-gate` 的联动。
+> - 离线验证：`tools/verify-bridge.mjs`(23) + `verify-bridge-v2.mjs`(74) + `verify-extension.mjs`(66) +
+>   `verify-extension-v2.mjs`(146) + `verify-host.mjs`(59) + `verify-browsers.mjs`(35，两个 Worker 扮演两台浏览器)。
+> - 设置页开关已存在（设置 → 浏览器观察窗 → 用户浏览器），不再是"放一个不工作的开关"。
 
 ## 0. 为什么要这条路线
 
@@ -74,9 +84,67 @@ Chrome 扩展 (MV3, service worker)
 
 ## 5. 分期
 
-- **P0（0.5 天）**：只做“用户浏览器里的页面**可读**（截图+文本+snapshot）”，不接管输入 —— 先验证桥与权限体验。
-- **P1（1 天）**：接入 Input 接管 + 标签页选择 + 下载事件。
-- **P2（0.5 天）**：设置页开关、approval-gate 联动、README、失败回退（扩展掉线自动切回插件实例）。
+- **P0（0.5 天）**：只做“用户浏览器里的页面**可读**（截图+文本+snapshot）”，不接管输入 —— 先验证桥与权限体验。**✅ 已落地（v0.5.0）**
+- **P1（1 天）**：接入 Input 接管 + 标签页选择 + 下载事件。**✅ 输入接管 + 标签页选择已落地（v0.6.0）；下载事件未做**
+- **P2（0.5 天）**：设置页开关、approval-gate 联动、README、失败回退（扩展掉线自动切回插件实例）。**设置页开关/README/失败回退已提前做；approval-gate 联动未做**
 
 验收：在用户日常 Chrome（含代理/登录态）里，agent 完成“登录态抓取 + 表单填写 + 下载”各一例，
 观察窗（内嵌与 `/bl/view`）均可直播与接管；断开扩展后所有 `browser_*` 自动回到插件实例且行为与现在一致。
+
+## 6. 落地实况（v0.5.0 / v0.6.0）
+
+与原设计的差异，都是实现时改的，记在这里免得下次踩同一坑：
+
+| 原设计 | 实况 | 为什么 |
+| --- | --- | --- |
+| `driveTarget: plugin \| user-extension` 设置项 | `settings.userBridge: boolean` + `bridgePort` | 同一件事，布尔更小；后端由"扩展是否连上"自动决定，用户不需要选 |
+| 端口写 `bridge.json`，握手用一次性 token | 同，但 token **持久化复用**（不是每次启动换） | 一次性 token 意味着每次重启 DSH 都要重新粘贴；持久化后"粘一次"。轮换留到 P2 |
+| token 由用户在扩展里粘贴 | 同，但设置页直接显示 + 一键复制（`/bl/bridge` 也返回） | 少一步找文件。`/bl/bridge` 无 CORS 头，网页 origin 读不到；WS 升级只认 `chrome-extension://` |
+| 扩展模式改 `chrome.tabs.query` 当 target 列表 | 在扩展里**模拟** `Target.getTargets/attachToTarget/detachFromTarget` | host 侧 `refreshTabs/attachTab` 一行没改，17 个工具调用面零改动 |
+| P1 直接放行 `Input.*` | 加了一层 **「允许操作」开关（默认关）**，且只在已授权站点上生效 | P0 已经交付了只读体验，直接默认开输入等于把只读承诺作废；开关让"看"和"动"分开授权 |
+| 下载走 `chrome.downloads.onChanged` | 未做（仍是 P2） | 输入接管优先；用户浏览器模式下 `browser_downloads` 目前仍指向插件自己的 downloads 目录（README 已标注） |
+| 观察窗红标 | 已做：`/bl/state` 带 `backend` + `allowInput`，`/bl/view` 顶部红标随开关换文案（读取 / 操作） | 安全项，便宜就先做 |
+| approval-gate 联动 | 未做 | 待 P2；当前护栏 = 逐站点授权 + 允许操作开关 + Chrome 调试横幅 |
+
+**实现里发现的三个真坑**（都已修，留档）：
+
+1. **MV3 SW 30s 空闲会被回收** —— 靠 WS 上每 20s 的 `ping/pong` 双向流量续命（host 15s 心跳 + 扩展 20s 自 ping）。
+2. **旧 socket 的 close 会晚于新 socket 建立** —— 重连时旧 `onclose` 把新连接的状态清掉。
+   解法：所有回调先 `isCurrent()`（`state.ws === ws`）判定，`disconnect()` 先摘引用再 close。
+3. **host 侧的 tab 缓存会把扩展的打码"复活"** —— 撤销授权后扩展回 url=''，但 host 的
+   `t.url = p.url || t.url` 把空串当成"无更新"，于是打码前的真实 URL 留在 `/bl/state` 里；
+   同时 host 还留着扩展已经丢掉的 sessionId，授权问题被伪装成"会话已失效"。
+   解法：扩展回 `allowed:false` 时**强制覆盖**本地缓存并作废 sessionId；监听 `detach` 事件；
+   工具层遇到会话失效自动清 session 重试一次。
+
+**仍未关掉的缺口（诚实记录）**：`Runtime.evaluate` 在扩展白名单里（snapshot/text 靠它取正文），
+所以扩展拦得住 `Input.*` 这类合成输入，拦不住页面内 JS 自己点按钮（`browser_eval` 理论上仍能代打）。
+收窄 evaluate（换成固定脚本下发）待做 —— 这是"允许操作开关"之外唯一能绕过的路径。
+
+## 7. P1 实机验证记录（v0.6.0）
+
+在真实 Chrome（152.0.7977.83）+ 番茄渠道商后台（`channel.novellairs.com`，已授权）上跑通：
+
+| 动作 | 证据 |
+| --- | --- |
+| 真点击输入框 | `mousedown`/`mouseup`/`click`，`isTrusted:true`，`elementFromPoint` 命中同一 input |
+| 真 ctrl+a | `keydown Control` + `keydown a`，`isTrusted:true` |
+| 真打字 | `beforeinput` + `input`，`data:"7611855200462048309"`，`isTrusted:true`，`value` 落 19 位 |
+| 真删除 | `keydown Delete` → `input` → `change`，`value` 变回 `''`（清掉演示数据） |
+| 真点击下拉 | 点「选择包」→ popper 打开 → 点 `novelbar` → 表单值变 `novelbar` |
+| 只读不抢焦点 | `Page.captureScreenshot` 不触发 `tabs.update` |
+
+**实机踩到的四个坑**（都写进 README / extension/README 了）：
+
+1. **后台标签页收不到输入**：`document.hidden=true` 时 `Input.dispatchMouseEvent` 被静默丢弃，
+   工具却回 `ok:true`。→ 发输入前 `chrome.tabs.update({active:true})`。
+2. **窗口失焦同样丢鼠标事件**（键盘偶尔能过，所以症状是"半好"）。
+   → `chrome.windows.update({focused:true})` + 等焦点到手 + 300ms 稳定期。
+3. **Windows 前台锁定**：后台进程抢焦点可能被系统拒绝（任务栏闪烁）。无法绕过，只能提示用户手动点一下 Chrome。
+4. **`disabled` 控件收不到鼠标事件**：番茄「新增推广链」里的「书籍ID + 搜书」搜索框是
+   `disabled:true`，真点击它没有任何事件（`mousemove` 却能到）——一度被我误判成接管失败。
+   这是 Chrome 的规范行为 + 页面的状态，不是 bug。此前 P0 阶段用 `evaluate` 直接赋值绕过了
+   disabled，所以"能搜"；真输入才暴露了这一点。
+
+**由此定下的产品行为**：agent 动手（`Input.*` / 上传）时会把目标标签+窗口置前；
+只读操作绝不抢焦点。用户侧可感知的代价是"agent 干活时 Chrome 会跳到前台"。

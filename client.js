@@ -32,10 +32,13 @@ window.__ModuleLoader__.load({
     var h = React ? React.createElement : null
 
     // ---------------------------------------------------------------- 样式
+    // 2026-09-11：DSH 主题全局给了 `*{corner-shape:superellipse(1.5)}`（方圆角），
+    // 于是所有 `border-radius:50%` 的真圆都会被画成圆角方块（按钮 hover 底衬尤其明显）。
+    // 宿主自己的圆形控件都写 `corner-shape:round` 豁免，这里照做；旧内核会自动忽略该属性。
     var CSS = [
-      '.bl-fab{width:22px;height:22px;border-radius:50%;border:none;background:transparent;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;position:relative;font-size:15px;line-height:1;padding:0;flex:none;transition:opacity .3s ease,filter .3s ease}',
+      '.bl-fab{width:22px;height:22px;border-radius:50%;corner-shape:round;border:none;background:transparent;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;position:relative;font-size:15px;line-height:1;padding:0;flex:none;transition:opacity .3s ease,filter .3s ease}',
       '.bl-fab:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.16))}',
-      '.bl-fab-dot{position:absolute;right:0;top:0;width:5px;height:5px;border-radius:50%;background:#3fb96f;box-shadow:0 0 4px rgba(63,185,111,.8)}',
+      '.bl-fab-dot{position:absolute;right:0;top:0;width:5px;height:5px;border-radius:50%;corner-shape:round;background:#3fb96f;box-shadow:0 0 4px rgba(63,185,111,.8)}',
       '.bl-fab-dot.bl-off{background:#b9bfc9;box-shadow:none}',
       '.bl-fab-stacked{position:fixed;z-index:2147483049}',
       // 退路样式：量不到遮罩层级时，浮球仍留在顶层，但自己糊成一层磨砂影（小玻璃板 +
@@ -49,7 +52,7 @@ window.__ModuleLoader__.load({
       '.bl-panel.bl-snap{transition:left .16s ease,top .16s ease}',
       '.bl-hd{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.2));flex:none;cursor:grab;user-select:none}',
       '.bl-hd.bl-drag{cursor:grabbing}',
-      '.bl-dot{width:8px;height:8px;border-radius:50%;background:#b9bfc9;flex:none}',
+      '.bl-dot{width:8px;height:8px;border-radius:50%;corner-shape:round;background:#b9bfc9;flex:none}',
       '.bl-dot.on{background:#3fb96f;box-shadow:0 0 6px rgba(63,185,111,.9)}',
       '.bl-title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600}',
       '.bl-url{flex:none;max-width:38%;color:var(--dsw-alias-label-tertiary,#888);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
@@ -70,8 +73,13 @@ window.__ModuleLoader__.load({
       '.bl-dl{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto}',
       '.bl-dl a{color:#5b8def;text-decoration:none;max-width:160px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border:1px solid rgba(91,141,239,.4);border-radius:6px;padding:1px 7px}',
       '.bl-key{position:absolute;left:-9999px;width:1px;height:1px;opacity:0}',
+      // 收起态：只剩底部一条细把手，基本不挡对话；点它（或 🌐）再展开盖回上层
+      '.bl-panel.bl-min{width:auto;min-width:0;max-width:min(440px,calc(100vw - 24px));border-radius:12px}',
+      '.bl-panel.bl-min .bl-tabs,.bl-panel.bl-min .bl-stage,.bl-panel.bl-min .bl-ft{display:none}',
+      '.bl-panel.bl-min .bl-hd{padding:6px 10px;border-bottom:0}',
+      '.bl-panel.bl-min .bl-url{max-width:140px}',
+      '.bl-panel.bl-min #bl-wide,.bl-panel.bl-min #bl-pop{display:none}',
     ].join('\n')
-
     function ensureStyles() {
       if (document.querySelector('style[data-bl-styles]')) return
       var el = document.createElement('style')
@@ -81,6 +89,30 @@ window.__ModuleLoader__.load({
     }
 
     // ---------------------------------------------------------------- 状态
+
+    /**
+     * 把独立观察窗抢到前台。
+     * `window.open` 在 Chrome 里通常把新页开成**后台标签**（除非是极短手势里同步开），
+     * 已经开着的窗口再点🌐也不会被带上来 —— 用户视角就是"点了没反应"。
+     * 这里做三件事：先 blur() 再 focus()（对"已开着但在后台/被别窗口盖住"最有效）、
+     * 连续补几次（部分窗口管理器会吃掉首次 focus）、并把内联脚本 focus 也试一遍。
+     * 失败静默（跨窗口权限策略允许拒绝），不影响其它逻辑。
+     */
+    function focusViewer(w, tries) {
+      var n = tries || 5
+      for (var i = 0; i < n; i++) {
+        (function (k) {
+          setTimeout(function () {
+            try {
+              if (!w || w.closed) return
+              if (k) { try { w.blur() } catch (e) {} }
+              try { w.focus() } catch (e) {}
+              try { if (w.document && w.document.body && w.document.body.focus) w.document.body.focus() } catch (e) {}
+            } catch (e) { /* 跨窗口权限被拒就放弃 */ }
+          }, k * 180)
+        })(i)
+      }
+    }
 
     var S = {
       open: false,
@@ -126,7 +158,8 @@ window.__ModuleLoader__.load({
         '  <span class="bl-url" id="bl-url"></span>',
         '  <button class="bl-btn" id="bl-wide" title="加宽">↔</button>',
         '  <button class="bl-btn" id="bl-pop" title="弹出为独立网页（可拖到副屏、全屏）">⧉</button>',
-        '  <button class="bl-btn" id="bl-hide" title="收起面板">✕</button>',
+        '  <button class="bl-btn" id="bl-min" title="收起成底部一条（不挡对话）">—</button>',
+        '  <button class="bl-btn" id="bl-hide" title="收走面板">✕</button>',
         '</div>',
         '<div class="bl-tabs" id="bl-tabs" hidden></div>',
         '<div class="bl-stage" id="bl-stage">',
@@ -155,6 +188,8 @@ window.__ModuleLoader__.load({
       els.act = p.querySelector('#bl-act')
       els.key = p.querySelector('#bl-key')
       els.dl = p.querySelector('#bl-dl')
+      els.minBtn = p.querySelector('#bl-min')
+      els.min = p
 
       p.querySelector('#bl-hide').addEventListener('click', function () { hidePanel(true) })
       p.querySelector('#bl-wide').addEventListener('click', function () {
@@ -162,7 +197,14 @@ window.__ModuleLoader__.load({
         p.classList.toggle('bl-wide', S.wide)
         applyPanelPos()   // 宽度变化后把面板钳回视口
       })
-      p.querySelector('#bl-pop').addEventListener('click', function () { openStandalone() })
+      // ⧉ 是用户主动点击：把弹出的独立观察窗抢到前台（否则会被开在后台标签里，看着像没反应）
+      p.querySelector('#bl-pop').addEventListener('click', function () { openStandalone(true) })
+      // — 收起成底部一条；⇧点标题行也能切换，不用去够那个小按钮
+      p.querySelector('#bl-min').addEventListener('click', function (ev) { ev.stopPropagation(); toggleMin() })
+      p.querySelector('.bl-hd').addEventListener('click', function (ev) {
+        if (ev.target && ev.target.closest && ev.target.closest('button')) return   // 点按钮不算
+        if (S.min || ev.shiftKey) toggleMin()
+      })
       p.querySelector('#bl-take').addEventListener('click', function () {
         S.takeOver = !S.takeOver
         this.textContent = S.takeOver ? '⌨ 接管:开' : '⌨ 接管:关'
@@ -201,6 +243,7 @@ window.__ModuleLoader__.load({
       })
       bindPanelDrag()
       bindPanelResize()
+      setMin(savedMin(), false)   // 记住上次是收起还是展开
     }
 
     // ------------------------------------------------- 鼠标键盘 → /bl/input
@@ -304,6 +347,8 @@ window.__ModuleLoader__.load({
           S.alive = true
           els.title.textContent = d.title || '浏览器观察窗'
           els.url.textContent = trimUrl(d.url)
+          S.pageTitle = d.title || ''
+          updateMinTitle()   // 收起态那条把手也要显示当前页面名
         })
         es.addEventListener('offline', function () {
           els.dot.classList.remove('on')
@@ -359,6 +404,7 @@ window.__ModuleLoader__.load({
     // --------------------------------------------------- 面板位置记忆/拖动/贴边
 
     var POS_KEY = 'bl-panel-pos-v1'
+    var MIN_KEY = 'bl-panel-min-v1'   // 收起态（只剩底部一条把手）也记住了，不用每次重收
     function blLoad(k) { try { return window.localStorage.getItem(k) } catch (e) { return null } }
     function blSave(k, v) { try { window.localStorage.setItem(k, v) } catch (e) {} }
     function savedPanelPos() {
@@ -375,6 +421,29 @@ window.__ModuleLoader__.load({
       var r = els.panel.getBoundingClientRect()
       blSave(POS_KEY, JSON.stringify({ x: Math.round(r.left), y: Math.round(r.top) }))
     }
+
+    // ---------------------------------------------------------- 收起态（底部细把手）
+    // 用户的实际用法：读对话时不想被盖住 → 收成一条；要盯 agent 时一键盖回上层。
+    // 收起态只留标题行（绿点 + 当前页面 + 🌐），整条可继续拖动/贴边。
+    function savedMin() { return blLoad(MIN_KEY) === '1' }
+    function updateMinTitle() {
+      if (!els.title) return
+      if (!S.min) { els.title.textContent = S.pageTitle || '浏览器观察窗'; return }
+      var t = (S.state && S.state.tabs || []).filter(function (x) { return x.selected })[0]
+      var name = S.pageTitle || (t ? trimUrl(t.url || '') : '')
+      els.title.textContent = '浏览器观察窗' + (name ? ' · ' + name : '') + '（点这里展开）'
+    }
+    function setMin(on, save) {
+      S.min = !!on
+      if (els.panel) els.panel.classList.toggle('bl-min', S.min)
+      if (els.minBtn) els.minBtn.textContent = S.min ? '▴' : '—'
+      if (els.minBtn) els.minBtn.title = S.min ? '展开面板' : '收起成底部一条（不挡对话）'
+      if (els.min) els.min.classList.toggle('bl-mini', S.min)
+      updateMinTitle()
+      applyPanelPos()          // 尺寸变了，位置要钳回视口
+      if (save !== false) blSave(MIN_KEY, S.min ? '1' : '0')
+    }
+    function toggleMin() { setMin(!S.min) }
     // 有记忆位置则贴过去并钳制在视口内；没有就清掉 inline 定位，回到 CSS 默认
     // （右下角 right/bottom:18px），避免上次拖动留下的 left/top 残留
     function applyPanelPos() {
@@ -633,13 +702,19 @@ window.__ModuleLoader__.load({
     // ---------------------------------------------------------------- 显示/隐藏
 
     // 独立网页观察窗（/bl/view，host 侧同一套接口的全屏页；可丢副屏/全屏）
-    function openStandalone() {
+    // steal=true：由用户点击触发 —— 已开着就把它抢到前台，新开的也补一次抢前台
+    function openStandalone(steal) {
       try {
-        if (S.viewWin && !S.viewWin.closed) { try { S.viewWin.focus() } catch (e) {} return true }
+        if (S.viewWin && !S.viewWin.closed) {
+          try { S.viewWin.focus() } catch (e) {}
+          if (steal) focusViewer(S.viewWin, 3)
+          return true
+        }
         var w = window.open('/bl/view', 'dshBlLiveView')
         if (!w) return false                       // 被弹窗拦截 → 调用方退回内嵌面板
         S.viewWin = w
         if (!S.poll) S.poll = setInterval(pollState, 2500)
+        focusViewer(w, steal ? 5 : 2)               // 用户点击时多补几次，确保真的翻到前台
         return true
       } catch (e) { return false }
     }
@@ -689,7 +764,7 @@ window.__ModuleLoader__.load({
     function showPanel(userInitiated) {
       // 两种情况走独立页：用户选了 standalone；或者**设置页正开着** —— 那块 560px 的窗
       // 摊在设置页上就是把人家内容盖掉，收进 /bl/view 两边各看各的（v0.4.3 选的②）。
-      if ((S.liveView || S.settingsUi > 0) && openStandalone()) {
+      if ((S.liveView || S.settingsUi > 0) && openStandalone(!!userInitiated)) {
         if (userInitiated) { S.userClosed = false; S.hideUntil = 0 }
         return
       }
@@ -753,6 +828,12 @@ window.__ModuleLoader__.load({
       var noteTxt = note[0], setNote = note[1]
       var filled = React.useState(false)
       var isFilled = filled[0], setFilled = filled[1]
+      var bs = React.useState(null)
+      var br = bs[0], setBr = bs[1]     // /bl/bridge 状态（P0 用户浏览器桥）
+
+      function loadBridge() {
+        api('/bl/bridge', { cache: 'no-store' }).then(function (r) { return r && r.ok ? r.json() : null }).then(function (j) { if (j) setBr(j) })
+      }
 
       function loadCfg() {
         // 同上：Response 要先 .json()，否则 cfg 是个 Response 对象、cfg.liveView 恒
@@ -763,6 +844,7 @@ window.__ModuleLoader__.load({
           S.liveView = j.liveView === 'standalone'
           if (!isFilled) { setProxy(j.proxy || ''); setExtra(j.extraArgs || ''); setFilled(true) }
         })
+        loadBridge()
       }
       React.useEffect(function () {
         S.settingsUi++
@@ -785,6 +867,7 @@ window.__ModuleLoader__.load({
             }
             setNote(msg || '已保存')
             setTimeout(function () { setNote('') }, 2600)
+            loadBridge()
           }).catch(function () { setNote('保存失败') })
       }
       var lab = { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', width: 96, flex: 'none' }
@@ -814,6 +897,97 @@ window.__ModuleLoader__.load({
           h('span', { style: lab }, '额外启动参数'),
           h('input', { style: inp, placeholder: '空格分隔，追加到 Chrome 命令行，如 --host-resolver-rules="MAP x.y.z.w 127.0.0.1"', value: extra, onChange: function (e) { setExtra(e.target.value) } }),
           h('button', { className: 'bl-btn', onClick: function () { put({ extraArgs: extra }, '启动参数已保存（下次拉起浏览器生效）') } }, '保存')),
+        // ---- 用哪个浏览器（v0.6.2 三档）----
+        // 关键区别：插件自带实例**不受逐站点授权限制**，所以"不是要登录的页面"直接用它就行；
+        // 用户的日常浏览器是逐站点授权的，只有确实要借用你的登录态时才值得切过去。
+        h('div', { style: box },
+          h('span', { style: lab }, '用哪个浏览器'),
+          h('button', {
+            className: 'bl-btn' + (!cfg || (cfg.backendMode || 'auto') === 'auto' ? ' bl-on' : ''),
+            onClick: function () { put({ backendMode: 'auto' }, '已设为默认：免登录页用插件自带实例（免授权、可新开页面）；要登录态的站我在扩展里授权后切你的浏览器') },
+            title: '推荐：不用授权的页一律走插件自己的窗口；需要你的登录态时才切到你的浏览器',
+          }, '免登录用自带实例（推荐）'),
+          h('button', {
+            className: 'bl-btn' + (cfg && cfg.backendMode === 'plugin' ? ' bl-on' : ''),
+            onClick: function () { put({ backendMode: 'plugin' }, '已锁定：只用插件自带实例（你的日常浏览器一律不参与）') },
+            title: '只用自己的实例，永远不碰你的浏览器',
+          }, '只用自带实例'),
+          h('button', {
+            className: 'bl-btn' + (cfg && cfg.backendMode === 'user' ? ' bl-on' : ''),
+            onClick: function () { put({ backendMode: 'user' }, '已切换：默认就用你的日常浏览器（逐站点授权、默认只读）') },
+            title: '与旧行为一致：默认在你的浏览器里操作，站点需先在扩展里允许',
+          }, '只用我的浏览器'),
+        ),
+        h('div', { style: { fontSize: 11.5, lineHeight: 1.7, color: 'var(--dsw-alias-label-secondary)', margin: '0 0 10px' } },
+          (cfg && cfg.backendMode === 'user')
+            ? '当前：默认在你的日常浏览器里操作（逐站点授权、默认只读；没授权过的站点会直接报"站点未授权"，且不能新开标签页）。'
+            : (cfg && cfg.backendMode === 'plugin')
+              ? '当前：只用插件自带实例（独立窗口 + 独立 profile，登录态存在插件目录），完全不碰你的日常浏览器；需要你的登录态时它帮不上忙。'
+              : '当前（推荐）：「免登录的网页」用 agent 自己的独立窗口开（不受逐站点授权限制、可新开页面），你的浏览器不受影响；'
+                + '只有需要"你的登录态"时，我在扩展里给该站点授权后才切到你的浏览器操作，做完再切回独立窗口。'),
+        // ---- v0.7：Chrome / Edge 可同时接入，按调用指定 ----
+        h('div', { style: box },
+          h('span', { style: lab }, '默认浏览器'),
+          (function () {
+            var list = (br && br.browsers) || []
+            var live = list.filter(function (b) { return b.connected })
+            var btns = []
+            btns.push(h('button', {
+              className: 'bl-btn' + (!(br && br.userDefault) ? ' bl-on' : ''),
+              title: '不指定：use:"user" 时用任一已接入的浏览器（有多个时按 Chrome → Edge 顺序）',
+              onClick: function () { put({ userDefault: '' }, '已清空默认浏览器：use:"user" 时自动挑一个已接入的') },
+            }, '自动'))
+            ;['chrome', 'edge'].forEach(function (k) {
+              var b = list.filter(function (x) { return x.kind === k })[0]
+              var on = !!(br && br.userDefault === k)
+              btns.push(h('button', {
+                className: 'bl-btn' + (on ? ' bl-on' : ''),
+                title: b && b.connected ? '这台已接入' : '这台还没接入（在该浏览器里装扩展并点连接）',
+                onClick: function () { put({ userDefault: k }, 'use:"user" 时默认用 ' + (k === 'edge' ? 'Edge' : 'Chrome')) },
+              }, (k === 'edge' ? 'Edge' : 'Chrome') + (b && b.connected ? ' ✓' : '')))
+            })
+            return h('span', null, btns)
+          })(),
+          h('span', { style: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' } },
+            '只是 use:"user" 的兜底；工具里直接写 use:"edge" / use:"chrome" 永远优先')),
+        // ---- P0：接管你自己的浏览器（扩展路线）----
+        h('div', { style: box },
+          h('span', { style: lab }, '用户浏览器'),
+          h('button', {
+            className: 'bl-btn' + (cfg && cfg.userBridge ? ' bl-on' : ''),
+            onClick: function () {
+              var on = !(cfg && cfg.userBridge)
+              put({ userBridge: on }, on ? '桥已开启：在 Chrome/Edge 里装好扩展并粘上 token 即可接管' : '桥已关闭：回到插件自拉实例')
+            },
+          }, cfg && cfg.userBridge ? '桥已开启' : '桥已关闭'),
+          h('span', { style: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' } },
+            '逐站点授权；默认只读，扩展里打开「允许操作」后可真点击/打字')),
+        (cfg && cfg.userBridge)
+          ? h('div', { style: { fontSize: 11.5, lineHeight: 1.7, color: 'var(--dsw-alias-label-secondary)', margin: '0 0 8px', padding: '7px 9px', borderRadius: 8, border: '1px solid ' + (br && br.connected ? 'rgba(198,40,40,.45)' : 'var(--dsw-alias-border-l2,rgba(127,127,127,.3))') } },
+            h('div', null, (function () {
+              var list = (br && br.browsers) || []
+              var live = list.filter(function (b) { return b.connected })
+              if (!live.length) return '⏳ 桥在 127.0.0.1:' + ((br && br.port) || '…') + '，还没有浏览器接入'
+              return '🔴 已接入：' + live.map(function (b) {
+                return (b.kind === 'edge' ? 'Edge' : b.kind === 'chrome' ? 'Chrome' : b.kind) +
+                  '（' + b.tabs + ' 标签' + (b.active ? ' · 当前在用' : '') + '）'
+              }).join(' · ')
+            })()),
+            h('div', { style: { marginTop: 4 } },
+              '授权：' + ((br && br.allowAll) ? '所有网站（高风险）' : (((br && br.origins) || []).length ? ((br.origins || []).length + ' 个站点') : '无')) +
+              ' · 允许操作：' + ((br && br.allowInput) ? '⚠ 开（可真点击/打字）' : '关（只读）') +
+              '（在扩展弹窗里改）'),
+            h('div', { style: { marginTop: 4, wordBreak: 'break-all' } }, 'token: ' + ((br && br.token) || '…'),
+              h('button', { className: 'bl-btn', style: { marginLeft: 6, height: 22, padding: '0 7px' }, onClick: function () { try { navigator.clipboard.writeText((br && br.token) || '') ; setNote('token 已复制') ; setTimeout(function () { setNote('') }, 2200) } catch (e) { setNote('复制失败，手动从 bridge.json 取') } } }, '复制')),
+            h('div', { style: { marginTop: 4 } },
+              '装扩展（Chrome 和 Edge 各装一次，可同时接入）：',
+              h('div', null, '· Edge：地址栏输 edge://extensions → 打开「开发人员模式」→「加载解压缩的扩展」→ 选 ' + ((br && br.extensionDir) || 'extension 目录')),
+              h('div', null, '· Chrome：地址栏输 chrome://extensions → 同上流程'),
+              h('div', null, '· 装完点工具栏里的扩展图标 → 粘上 token → 点「连接」；再点「允许当前所有标签页」把你要交给我操作的站点一次授权。')),
+            h('div', { style: { marginTop: 2, color: 'var(--dsw-alias-label-tertiary)' } },
+              '怎么用：要登录的站点先在扩展弹窗里点「允许」（或「允许当前所有标签页」），再让我用 browser_open {use:"edge"} 或 {use:"chrome"} 指定这台浏览器；做完 {use:"plugin"} 切回独立窗口。' +
+              '边界：默认只读（能看能导航）；「允许操作」打开后我才能真点击/打字/上传，且只在已授权站点上生效；新建/关闭标签页、改网络仍被拒。browser_close 只断开读取，不关你的浏览器。'))
+          : null,
         noteTxt ? h('p', { style: { fontSize: 12, color: 'var(--dsw-alias-brand-primary,#5b8def)', margin: '2px 0 0' } }, noteTxt) : null,
         h('p', { style: { fontSize: 11.5, color: 'var(--dsw-alias-label-tertiary)', margin: '8px 0 0' } },
           '代理与额外参数改动不在已运行的浏览器上生效：点面板「⏹ 关浏览器」或让 agent 关闭后重新拉起即带上；',

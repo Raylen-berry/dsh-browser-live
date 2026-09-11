@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "DSH Browser Bridge",
+  "version": "0.3.0",
+  "description": "把 DSH 的 browser_* 工具接到你日常浏览器的标签页（Chrome / Edge / Brave / Opera 各装一份，互不干扰）：默认只读，打开「允许操作」后可真点击/打字/上传",
+  "minimum_chrome_version": "116",
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "DSH Browser Bridge"
+  },
+  "options_ui": {
+    "page": "popup.html",
+    "open_in_tab": true
+  },
+  "permissions": [
+    "debugger",
+    "tabs",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*"
+  ]
+}

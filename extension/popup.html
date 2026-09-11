@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>DSH Browser Bridge</title>
+<style>
+  :root { color-scheme: dark; }
+  body { width: 340px; margin: 0; padding: 12px; background: #0d1117; color: #dfe6ef;
+         font: 12px/1.5 system-ui, "Segoe UI", sans-serif; }
+  /* 同一份页面也当「扩展程序选项」用（open_in_tab）：在标签页里居中加宽，弹窗里不受影响 */
+  @media (min-width: 520px) {
+    body { width: auto; max-width: 560px; margin: 0 auto; padding: 22px; }
+  }
+  h1 { font-size: 13px; margin: 0 0 8px; display: flex; align-items: center; gap: 7px; }
+  .ident { color: #8b98a9; font-size: 10.5px; margin: -4px 0 8px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #b9bfc9; flex: none; }
+  .dot.on { background: #3fb96f; box-shadow: 0 0 7px rgba(63,185,111,.9); }
+  .dot.err { background: #ff7b72; }
+  fieldset { border: 1px solid #222a35; border-radius: 8px; margin: 0 0 10px; padding: 8px 10px; }
+  legend { color: #8b98a9; font-size: 11px; padding: 0 4px; }
+  label.row { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
+  input[type=text], input[type=number] { flex: 1; min-width: 0; background: #161c24; color: inherit;
+    border: 1px solid #2b3542; border-radius: 6px; height: 26px; padding: 0 7px; font: inherit; }
+  button { border: 1px solid #2b3542; background: #161c24; color: inherit; border-radius: 6px;
+    height: 26px; padding: 0 10px; cursor: pointer; font: inherit; }
+  button:hover { border-color: #3b4757; }
+  button.primary { background: rgba(91,141,239,.18); border-color: #5b8def; }
+  button.danger { color: #ff7b72; border-color: rgba(255,123,114,.4); }
+  button.mini { height: 22px; padding: 0 7px; font-size: 11px; }
+  .muted { color: #8b98a9; font-size: 11px; }
+  .warn { color: #ffb454; font-size: 11px; }
+  .err { color: #ff7b72; font-size: 11px; word-break: break-all; }
+  .ok { color: #3fb96f; font-size: 11px; word-break: break-all; }
+  .bad { color: #ff7b72; font-size: 11px; word-break: break-all; }
+  #tabs { max-height: 168px; overflow: auto; }
+  .tab { display: flex; align-items: center; gap: 6px; padding: 3px 0; border-bottom: 1px dashed #1d242e; }
+  .tab:last-child { border-bottom: 0; }
+  .tab .ti { flex: 1; min-width: 0; }
+  .tab .ti b { display: block; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tab .ti span { color: #8b98a9; font-size: 10.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+  .tab.attached { background: rgba(198,40,40,.10); }
+  .row2 { display: flex; gap: 6px; margin-top: 6px; }
+  .row2 button { flex: 1; }
+</style>
+</head>
+<body>
+  <h1><span class="dot" id="dot"></span><span id="headline">未连接</span></h1>
+  <div class="ident"><span id="browserName">浏览器识别中…</span> · 本扩展只控制这一个浏览器</div>
+
+  <fieldset>
+    <legend>连接</legend>
+    <label class="row">端口 <input type="number" id="port" min="1024" max="65535" step="1"></label>
+    <label class="row">Token <input type="text" id="token" placeholder="从 bridge.json 复制" spellcheck="false"></label>
+    <div class="row2">
+      <button id="connect" class="primary">连接</button>
+      <button id="disconnect">断开</button>
+    </div>
+    <label class="row"><input type="checkbox" id="auto"> 自动重连（浏览器启动后自动连）</label>
+    <div class="muted" id="hint">token 在 <code>$DSH_HOME/dsh-browser-live/bridge.json</code> 里，粘一次即可。</div>
+  </fieldset>
+
+  <fieldset>
+    <legend>授权（逐站点）</legend>
+    <div class="muted" id="granted">已授权：无</div>
+    <div id="tabs" class="muted">读取中…</div>
+    <label class="row"><input type="checkbox" id="allowInput"> <span class="warn">允许操作（真点击 / 打字 / 按键 / 上传）— P1，默认关</span></label>
+    <label class="row"><input type="checkbox" id="allowAll"> <span class="warn">允许所有网站（高风险：等于放弃逐站点确认）</span></label>
+    <div class="row2">
+      <button id="allowAllTabs" class="primary">允许当前所有标签页</button>
+      <button id="revokeAll" class="danger">撤销全部授权</button>
+    </div>
+    <div class="row2">
+      <button id="detachAll" class="danger">断开所有标签页</button>
+    </div>
+  </fieldset>
+
+  <div class="muted" id="log"></div>
+  <div class="ok" id="flash"></div>
+  <div class="err" id="err"></div>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

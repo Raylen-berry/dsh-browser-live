@@ -2,6 +2,7 @@
 
 让 agent 驱动**本机真实 Chrome/Edge/Brave**（CDP 直连，无 vendored 运行时、无裸 npm 依赖），
 并在右下角开一块**实时观察窗**：agent 在网页上干什么，你全程看得见，还能直接接管鼠标键盘。
+v0.5.0 起还可选**接管你自己的日常浏览器**（装一个 MV3 扩展，带你的登录态/代理，P0 只读）。
 
 > 设计灵感来自 [dsh-ego-browser](https://github.com/Fisfzy/dsh-ego-browser)（MIT）。本插件是**自研实现**：
 > 不携带 ego-lite 运行时、零裸 import，与 `link:` 本地安装工作流完全兼容（同 dsh-bg-atelier / dsh-cache-control 约定）。
@@ -17,7 +18,9 @@ DSH 内置的 web_search/web_fetch 只能"读"；凡是**必须真浏览器**的
 
 | 文件 | 职责 |
 |---|---|
-| `index.js` | Host（ESM）：拉起/接管 Chrome → CDP；注册 17 个 `browser_*` 工具；`/bl/*` 观察窗后端（SSE 帧流 + 输入回传 + 设置/代理 + 下载取回 + `/bl/view` 独立网页） |
+| `index.js` | Host（ESM）：拉起/接管 Chrome → CDP；注册 17 个 `browser_*` 工具；`/bl/*` 观察窗后端（SSE 帧流 + 输入回传 + 设置/代理 + 下载取回 + `/bl/view` 独立网页 + `/bl/bridge` 桥状态） |
+| `bridge.js` | 用户浏览器桥（P0）：127.0.0.1 WS 服务端 + token 握手 + 与 `Cdp` 同形的 `send/on/alive/close` |
+| `extension/` | Chrome MV3 扩展（P0）：service worker 当"反向 CDP 客户端"（`chrome.debugger`），弹窗逐站点授权；见 `extension/README.md` |
 | `client.js` | Client 单文件：侧栏 🌐 按钮（无 slots 环境退化为自建浮球；与 bg-atelier 宝珠叠列共存）+ 观察窗（实时帧、标签条、agent 动作条、鼠标键盘接管、FPS/画质、下载取回；内嵌面板可拖动贴边，或切成独立网页） |
 | `cordis.patch.yml` | bundle 装载声明（行 id == 包名，客户端模块扫描按 manifest name 匹配） |
 | `package.json` | `dsh.bundle.patch` + `dsh.client`（platform web，注入 runtime/ui-slots） |
@@ -34,7 +37,7 @@ dsh plugin --profile web add link:D:\DeepSeek\dsh-plugins\dsh-browser-live
 
 | 工具 | 说明 |
 |---|---|
-| `browser_open` | 启动/接管浏览器（懒启动），可选 url / newTab |
+| `browser_open` | 启动/接管浏览器（懒启动），可选 url / newTab / `use` |
 | `browser_navigate` | 导航并等加载完成 |
 | `browser_snapshot` | 结构化快照：可见交互元素清单（ref 编号+坐标）+ 正文节选。**点击前先拿 ref** |
 | `browser_click` | ref / CSS selector / 坐标三选一，真实鼠标事件（右键、双击可选）；**默认走拟人贝塞尔轨迹**（`instant:true` 可瞬移） |
@@ -49,10 +52,14 @@ dsh plugin --profile web add link:D:\DeepSeek\dsh-plugins\dsh-browser-live
 | `browser_screenshot` | 可视区/整页 PNG 落盘，路径可直接交给读图工具 |
 | `browser_tabs` | 标签页 list/new/select/close |
 | `browser_history` | 前进/后退/刷新（可强刷） |
-| `browser_downloads` | 下载目录清单（观察窗里也能一键取回） |
-| `browser_close` | 关浏览器（profile 保留，登录态不丢） |
+| `browser_downloads` | 下载目录清单（观察窗里也能一键取回；用户浏览器那档仍只列插件实例的目录） |
+| `browser_close` | 关浏览器（profile 保留，登录态不丢）；用户浏览器那档**只断开调试器，不关你的浏览器** |
 
-所有工具串行互斥；首次调用自动拉起浏览器并弹观察窗。
+**每个工具都带一个 `use` 参数**（v0.7.0）——`'plugin'` / `'chrome'` / `'edge'` / `'user'` / `'auto'`，
+用来在同一个会话里指定这次调用落在哪台浏览器上（详见「接管你自己的浏览器」一节）。
+不写 `use` = 沿用上一次调用用的那台。
+
+所有工具串行互斥（一次只跑一个）；首次调用自动拉起浏览器并弹观察窗。
 
 ## 拟人轨迹（v0.3.0）
 
@@ -97,7 +104,7 @@ agent 的鼠标移动（`browser_click` / `browser_move`）默认不再是"瞬�
 
 ## 数据与隐私
 
-全部落在 `$DSH_HOME/dsh-browser-live/`：`settings.json`、`state.json`、
+全部落在 `$DSH_HOME/dsh-browser-live/`：`settings.json`、`state.json`、`bridge.json`（用户浏览器桥的端口与 token）、
 `chrome-profile/`（登录态）、`downloads/`、`shots/`。CDP 只绑 `127.0.0.1`；
 观察窗路由与宿主其他插件路由（`/bga/*`、`/cc/*`、`/api/*`）互不重叠。
 不关闭浏览器时它会一直在——用完调 `browser_close` 或点面板 ⏹。
@@ -112,12 +119,104 @@ agent 的鼠标移动（`browser_click` / `browser_move`）默认不再是"瞬�
   这不是插件问题：宿主内正常运行不受影响；离线验证请用允许命名管道的会话跑
   `node 03-调试临时\bl-e2e.mjs`。
 
-## 已知边界（v0.4.3）
+## 接管你自己的浏览器（v0.5.0 起；v0.7.0 起 Chrome / Edge 可**同时**接入）
+
+默认后端是**插件自拉的隔离实例**（独立 profile，登录态是插件自己的）。
+想要 agent 用**你日常那个浏览器的登录态/代理/扩展**，走扩展路线：
+
+```
+host(index.js) ──WS──> 扩展（extension/, MV3，Chrome 和 Edge 各装一份）
+                          └── chrome.debugger ──> 各自真实的标签页
+```
+
+**Chrome 与 Edge 各装一份扩展，两条连接可以同时挂在桥上**；每次工具调用用 `use` 指定用哪台。
+会话状态（标签页列表、当前标签、CDP 会话）按浏览器分开存，不会串台；
+`sessionId` 一律带 `<浏览器>:` 前缀，桥靠这个前缀把请求和事件路由到正确的那条连接
+（协议见 [`docs/MULTI-BROWSER.md`](./docs/MULTI-BROWSER.md)）。
+
+为什么必须装扩展、不能直接 CDP attach 你的浏览器：Chrome/Edge 136+ 在**默认 user-data-dir** 上
+直接忽略 `--remote-debugging-port` / `--remote-debugging-pipe`（安全加固，CVE-2025-4051/4052）。
+本机 Chrome 153、Edge 152 都早就过了这道线，`chrome.debugger` 是唯一像样的路。
+
+**开启**：设置页「浏览器观察窗 → 用户浏览器」点成「桥已开启」（面板显示端口 + token，可一键复制），
+然后按 [`extension/README.md`](./extension/README.md) 在 **Chrome 和 Edge 里各加载一次**扩展并粘 token。
+同一个 token 两边通用；桥只绑 `127.0.0.1`，握手要 token，升级请求只认 `chrome-extension://` 的 Origin
+（网页里的 `ws://127.0.0.1` 连不进来）。设置页会列出**当前已接入的浏览器**，并可指定
+`use:"user"` 默认用哪台（直接写 `use:"edge"` / `use:"chrome"` 永远优先于这个默认值）。
+
+**日常用法（"免登录页 / 要登录的页"分工）**：默认档 `auto` 下，免登录的网页一律走插件自带实例
+（不受逐站点授权限制、可 `newTab` 新开页）；只有确实要你的登录态时才切到你的浏览器：
+
+1. 在**那台浏览器**的扩展弹窗里给该站点点「允许」（整批页面可点「允许当前所有标签页」；
+   要真点击/打字再打开「允许操作」）；
+2. `browser_open { url, use: "edge" }` → agent 在 Edge 当前标签页里导航/操作（用户浏览器档**不能新开标签页**）；
+3. 完事 `browser_open { use: "plugin" }` 切回独立窗口，后面的免登录活继续不受授权限制。
+
+`use` 取值：`plugin`（自带实例）/ `chrome` / `edge`（你的浏览器，必须已接入）/ `user`（settings.userDefault 那台）/
+`auto`（桥连着就用你的浏览器）。**不写 `use` = 沿用上一次调用用的那台**，冷启动默认 `plugin`；
+显式指定的浏览器没接入时会**明确报错并列出当前已接入的** —— 绝不静默换到另一台去操作。
+
+`browser_open` 的返回值里 `browser` 字段告诉你当前实际用的是哪个（`插件自带实例` / `你的 Edge`），
+`connected` 列出当前已接入的浏览器，`hint` 直接给出下一步该传什么。
+
+**三层开关**（都在扩展弹窗里，逐层收紧；两台浏览器各自一套）：
+
+| 开关 | 默认 | 作用 |
+| --- | --- | --- |
+| 逐站点「允许」 | 无授权 | 没点过的站点，url/标题对 agent 一律打码，调试器也附加不上 |
+| 「允许当前所有标签页」 | — | 一次性把该浏览器里所有 http(s) 标签页的 origin 并入白名单（不打开「允许所有网站」） |
+| 「撤销全部授权」 | — | 清空白名单（有二次确认） |
+| **允许操作**（v0.6.0 / P1） | **关** | 打开后才放行 `Input.*` 与 `DOM.setFileInputFiles`（真点击/打字/按键/滚轮/上传） |
+| 允许所有网站 | 关 | 高风险：放弃逐站点确认 |
+
+**只读能力（永远可用）**：`browser_snapshot` / `browser_text` / `browser_screenshot` /
+`browser_tabs list` / `browser_navigate` / `browser_wait`。观察窗照样直播（帧也是经扩展回的
+`Page.captureScreenshot`），`/bl/view` 与内嵌面板会亮红标：只读时「🔴 正在读取你的 Edge」，
+打开「允许操作」后变成「🔴 正在操作你的 Edge（可点击/打字）」。
+
+**P1 操作能力**（需打开「允许操作」）：`browser_click` / `browser_move` / `browser_type` /
+`browser_press` / `browser_scroll` / `browser_upload` —— 事件经 `chrome.debugger` 注入
+（`isTrusted:true`，与真人同层），拟人鼠标轨迹照旧生效。
+
+**实机测出来的三条硬约束**（v0.6.0 已处理，但你必须知道）：
+
+1. **输入只送到「可见 + 窗口有焦点」的标签页**。后台标签、失焦窗口下 Chrome 会静默丢弃
+   `Input.dispatchMouseEvent`（键盘偶尔能过，所以看起来"半好"）。扩展在发任何输入前会
+   `chrome.tabs.update({active:true})` + `chrome.windows.update({focused:true})`，
+   等窗口真的拿到焦点后再等 300ms 才发事件 —— 也就是说 **agent 动手时会把 Chrome 拉到前台**。
+   Windows 的前台锁定可能拒绝被抢焦点（任务栏闪烁而不切换），这时需要你手动点一下 Chrome 窗口。
+   只读命令（截图 / 取文本 / 快照）**不会**抢你的前台标签。
+2. **`disabled` 的表单控件收不到鼠标事件**（Chrome 行为，不是接管失败）：真点击一个 disabled
+   输入框会"没反应"。实测番茄渠道商后台「新增推广链」里的「书籍ID + 搜书」搜索框就是
+   `disabled:true`（要先选「选择包」等前置项），点它没反应是页面状态；同对话框里可用的
+   「书籍ID」表单项真点击/真打字正常。
+3. **坐标必须一次到位**：元素若在测量后被页面重排（Element UI 的对话框滚动），点击会落空。
+   用 `instant:true` 可把"测量→下发"的间隔压到一个往返，成功率高得多。
+
+**仍然被拒**（扩展侧硬拒，会以错误结果返回，不会静默）：
+
+| 被拒 | 原因 |
+| --- | --- |
+| `browser_tabs new/close` | 不新建/关闭你的标签页（`Target.createTarget/closeTarget`） |
+| `browser_downloads` | 列的仍是插件实例的 `downloads/` 目录，看不到你 Chrome 自己的下载（接 `chrome.downloads` 属 P2） |
+| 未授权站点 | 逐 origin 授权；没授权时连调试器都附加不上，开了「允许操作」也进不去 |
+| 改网络 / 模拟器 / 改属性 | `Network.setExtraHTTPHeaders`、`Emulation.*`、`DOM.setAttributeValue` 不在接管范围 |
+
+**兜底**：扩展掉线 → 下一次工具调用自动回退插件实例（行为与 v0.4.3 完全一致）；
+`browser_close` 在用户浏览器模式下**只拆调试器，绝不关你的浏览器**；
+扩展侧会话失效（SW 重启 / DevTools 抢走调试器）时 host 会自动清 session 重试一次。
+
+**已知缺口**：`Runtime.evaluate` 在扩展白名单里（snapshot/text 靠它取正文），所以扩展拦得住
+"合成输入"，拦不住页面内 JS 自己点按钮 —— 也就是说 `browser_eval` 理论上仍能代打。
+真正的护栏是逐站点授权 + 「允许操作」开关 + Chrome 那条无法隐藏的「正在调试此浏览器」横幅。
+收窄 evaluate（改成固定脚本下发）仍是待办。
+
+## 已知边界（v0.5.0）
 
 - 观察窗单实例（整个宿主一个浏览器会话，不做多会话隔离）；多 agent 并发浏览请串行使用
   （多个会话共用同一受控 Chrome 时会互相抢标签页，这是设计如此，不是 bug）。
-- 驱动的是插件自己拉起的 Chrome/Edge profile；**接管你日常浏览器**需要走扩展路线，
-  方案与分期见 `docs/PLAN-user-browser-takeover.md`（尚未实现，所以设置页里没有这个开关）。
+- 默认后端仍是插件自拉实例；**接管你日常浏览器**是 v0.5.0 的扩展路线（P0 只读，见上），
+  P1（输入接管）/ P2（审批联动、evaluate 收窄）未做。
 - `Page.captureScreenshot` 取帧（非 screencast 事件流），高 FPS 下 CPU 开销线性上涨，默认 2fps。
 - `browser_upload` 支持 `<input type=file>`（含隐藏 input、React 自定义组件的 label 包裹）；纯 HTML5 拖拽（无 input）与跨 origin iframe 内交互未做。
 - 拟人轨迹 = 页面侧事件流仿真；**系统光标位置不动**，比对 `screenX` 与 OS 光标高阶风控理论上可辨（极少数场景）。
@@ -146,6 +245,150 @@ agent 的鼠标移动（`browser_click` / `browser_move`）默认不再是"瞬�
 
 ## 版本与变更记录
 
+- **v0.7.1（2026-09-11 修）**：真圆的方圆角豁免。DSH 主题自带全局规则
+  `*,:before,:after{corner-shape:var(--dsw-corner-shape)}`，而默认值是 `superellipse(1.5)`；
+  新版 Chromium 支持 `corner-shape` 后，凡 `border-radius:50%` 的元素都会被画成方圆块
+  （用户报的是底图工坊的宝珠，本插件的 `.bl-fab` hover 底衬、`.bl-dot`、
+  独立网页 `/bl/view` 里的 `.dot` 同理）。宿主自己的圆形控件都写了 `corner-shape:round` 豁免，
+  本插件已照做（`client.js` 三处 + `index.js` 的 `/bl/view` 一处）。旧内核自动忽略该属性。
+  注意 `index.js` 是宿主侧文件：改完要重启桌面端，`/bl/view` 页面才会换新。
+- v0.7.0：**Chrome / Edge 同时可控，每次调用指定用哪台（`use`）**
+  - 需求：日常两个浏览器（Chrome 153 / Edge 152）各有登录态，agent 要能操作 **Edge 里已登录的页面**，
+    而且要能在同一个会话里来回切，不必断开重连。
+  - 桥（`bridge.js`）：单个连接槽（`this.sock/this.ext`）→ `conns: Map<kind, BridgeChannel>`，
+    **每个 kind 一条连接、各自的 pending/seq/心跳**（同 kind 重复连接保留最新，旧的以 `4002 superseded` 关掉）。
+    回包按 `sessionId` 的 `<kind>:` 前缀找连接再配对，找不到就忽略（不抛）。
+    `kindOfBrowser` 现在**纯 kind 与完整 UA 两种形状都认**（原先只认 UA，"opera" 这种族名会静默落进 unknown）。
+  - 扩展（`extension/`，v0.3.0）：装载时按 UA 嗅探身份（`Edg/`→edge…）并在 hello 里上报；
+    **所有跨 WS 边界的 sessionId 一律带 `<kind>:` 前缀**（出口加、入口剥，内部仍用裸 id）；
+    弹窗新增身份行 + **「允许当前所有标签页」**（批量并入 origin，不打开 allowAll）+「撤销全部授权」。
+  - host（`index.js`）：新增**每浏览器一份会话**（tabs / selected / cdp 分开存），
+    `browser` 单例退化为"当前活跃会话的视图"，于是 19 个工具里上百处 `browser.xxx` 读法一行没改；
+    每个工具注入 `use` 参数（`plugin`/`chrome`/`edge`/`user`/`auto`，缺省**沿用上一次**）；
+    `/bl/state` 与 `/bl/bridge` 新增 `browsers[]`，观察窗红标带上浏览器名；`settings.userDefault` 决定 `use:"user"` 指哪台。
+  - 隐私/安全边界不变：仍是逐站点授权 + 「允许操作」开关 + Chrome/Edge 自带且无法隐藏的调试横幅。
+    多浏览器只扩大"能连几台"，不放松任何一层。
+  - 行为修正（都是这次改造暴露出来的真问题）：
+    · `browser_close` 之后 `browser_open` 接不回来（外层守卫抢在 `browser_open` 自己的 `useSession/launch` 之前判死）；
+    · 没写 `use` 时若"上一次那台"已掉线，会一路报错 → 现在退回插件实例并记录一行提示；
+      显式写了 `use:"edge"` 而它掉线时**仍然报错**（明示意图不该被静默改写）；
+    · `use` 取值校验用错了判定（`isUserKind` 把 `firefox` 当成"未接入的浏览器"）→ 新增 `isKnownKind`；
+    · `onBridgeStatus` 的兜底分支曾把完整 UA 当 kind 塞进 Set（子代理 review 抓到）→ 改为读 `browsers[].kind`；
+    · `backendMode='user'` 时桥从 0→N 接入会把活跃会话切到你的浏览器（恢复 v0.6 的档位语义）。
+  - 验证：新增 `tools/verify-browsers.mjs`（**35 项**）——真 `index.js` + 真桥 + 真扩展，
+    **两台"浏览器"各跑在一个 Worker 里**（独立 realm = 独立 `globalThis`），断言"发给 Edge 的命令只打在
+    Edge 的标签页上""两台各自一份调试器会话""同 kind 重连只占一个槽""掉线不影响另一台"等串台类故障。
+    另有 `tools/verify-bridge-v2.mjs`（74 项）、`tools/verify-extension-v2.mjs`（146 项）。
+    五个套件合计 **23 + 74 + 66 + 146 + 59 + 35 = 403 项全绿**（v1 那两个套件也一并保留通过）。
+  - 记一笔踩过的坑（替身层面，但东西是真的）：在**同一个 realm** 里加载两份扩展副本时，
+    模块级自由变量 `chrome` 指向同一个 `globalThis`，靠"副本开头重新赋值"隔离不了 ——
+    表现是 Chrome 扩展读到 Edge 的标签页，断言全绿但全是假的。两个 Worker 才是与"两个浏览器进程"同构的替身。
+  - 提醒：改 `index.js` / `client.js` 后要**重启 DSH Desktop** 才加载新代码与新的设置页控件。
+- v0.6.2：**把"免登录页走自带实例、授权后才切你的浏览器"这条默认路做成看得见的一档**
+  - 背景：v0.6.1 已经有 `backendMode='auto'`，但设置页只有「自带实例（推荐）/ 我的浏览器」两档，
+    文案也没写清"免登录页 vs 要登录的页"各走谁 —— 于是很容易被设成 `user`，
+    之后**每一个免登录页面都撞逐站点授权**（表现为"连 example.com 都开不了"）。
+  - 设置页三档，标签直接写明用途：**免登录用自带实例（推荐，=auto）/ 只用自带实例（=plugin）/ 只用我的浏览器（=user）**；
+    下面那行说明按档位分别讲清"免登录页去哪、要登录的页怎么办"。
+  - `browser_open` 的返回值新增 `mode`（当前档位）与 `hint`（下一步该 `use:"plugin"` 还是 `use:"user"`），
+    描述里也写明：`auto`/`plugin` 免授权、可 `newTab`；`user` 档逐站点授权、只读、**不能新开标签页**。
+  - `PUT /bl/settings.json` 改 `backendMode` **当场换后端**（原来要等下一次工具调用才切）；
+    桥/扩展还没连上时切 `user` 只存设置并回 `backendWarn`，等扩展接入后由 `onBridgeStatus` 自愈。
+  - `tools/verify-host.mjs` 跟着修：**原来的用例假设"桥一连上就切 user"（v0.6.0 旧行为），在 `auto` 档下必然红**；
+    改成先显式设 `backendMode:'user'` 再验用户浏览器那条链路，并新增两条用例
+    （`auto` 档下桥连着也不抢后端、`PUT` 切档当场生效）。47 项全绿。
+  - 提醒：改 `index.js` / `client.js` 后要**重启 DSH Desktop** 才加载新代码与新的设置页按钮（工具描述在插件装载时定型）。
+- v0.6.4：**能在插件实例里打开 DSH 自己的 GUI（`browser_open {gui:true}`）**
+  - 症状：在插件自带实例（独立 profile）里访问 `http://127.0.0.1:<端口>/` 只会得到
+    `dsh web authentication required; reopen the URL printed by dsh web.`。
+  - 机制（`@deepseek-ai/dsh-client-connection` 的 `authorizeIndex`）：GUI 根路径只认两样东西 ——
+    ① URL 查询串里的**一次性 launch token**（`?token=…`，仅 `GET /`）会 303 落地并种一个**按 Host 绑定的签名 cookie**；
+    ② 之后靠那个 cookie。插件 Chrome 是干净 profile，两样都没有 → 必然 401。
+    token 由进程生成、只在"DSH 启动时打印的 URL"里下发，凭据库（`.credentials.yaml`）只存 cookie 签名密钥，不存 URL。
+  - 改法：**不绕过门禁**，改用宿主自己的接口 —— 与 `dsh-web-app` 打印 dsh web URL 用的是同一个：
+    `ctx.inject(['connection'], c => c.connection.authenticatedUrl('http://127.0.0.1:<webServer.port>'))`。
+    - 启动时取一次并缓存（拿不到只警告，不影响任何既有功能）；
+    - 新增路由 `POST /bl/gui` `{need:'gui-url'}` → `{ok,url}`；可带 `base` 换成 LAN 地址（同一套 token 规则重签）；
+    - `browser_open {gui:true}` 用它打开 GUI；
+    - 取向：**只认 POST + JSON**（裸 GET 会被 `<img>/<script>` 这类跨站请求捎带上 token；POST+JSON 触发预检，
+      而本服务不返回 CORS 头，跨站读不到结果），且 token **不进入**工具失败结果的错误文本（有测试钉住）。
+  - `tools/verify-host.mjs` 新增 6 项（400 / 405 / 正确 URL / LAN 重签 / gui:true 走到启动 / 不泄露 token），
+    套件 **58 项全绿**；为此把假 ctx 扩成 `get/inject/effect` 齐全，并给假 `webServer` 补上 `port`。
+  - 前提：宿主 web profile 里要有 `connection` 服务（本机 DSH Desktop 有；纯 headless 且没配它的场景拿不到 URL，
+    此时按提示改用"启动时打印的 dsh web URL"）。
+
+
+- v0.6.3：**让插件自拉实例真的有一个"能看见的窗口"（`launchDetached`）**
+  - 症状（用户报回来的）：免登录页在插件实例里打开一切正常（工具全返回 ok、观察窗有画面），
+    但**屏幕上根本看不到那个浏览器窗口**，只能靠观察窗看。user32 枚举证实：插件实例的 8 个 chrome
+    进程（同一 Windows 会话、`headless=false`、页面自报 `outer 1440x900`）**没有任何一个持有窗口句柄**，
+    而用户自己的 Chrome 有 —— 即窗口没在系统里注册，不是被最小化。
+  - 根因：`spawn(exe, args, { detached: false })` 把 Chrome 拉成 DSH 进程树的子进程；在带作业对象/
+    受限桌面的宿主里，Chrome 的窗口不注册。`detached: true` 也不够（Windows 上子进程仍留在同一作业对象）。
+  - 改法：默认 `launchDetached: true` —— 写一个极小的 VBScript 启动器到数据目录
+    （`launch-chrome-detached.vbs`，`WScript.Shell.Run(cmd, 1, False)`），用 `wscript` 起 Chrome，
+    使它成为**没有父作业对象的独立进程**，从而拿到真实可见窗口。启动器写失败/起不来时**自动回退**
+    老的子进程 spawn，所以不会把浏览器整体打死。
+  - 顺手把"窗口是否可见"变成**可观测事实**：启动后用 CDP 的 `Browser.getWindowForTarget` +
+    `Browser.getWindowBounds` 自查（Chrome 自己报的，不依赖宿主能不能枚举 Win32 窗口），结论写进
+    观察窗动作条：`🪟 ✓ 启动后自查：窗口存在且可见（windowId=…，state=normal，1440x900）`；
+    窗口尺寸小于设置值时自动 `Browser.setWindowBounds` 修正。
+  - `browser_close` / `shutdown` 在独立启动下只走 CDP `Browser.close`（`proc` 此时是启动器，杀它没用）；
+    `process.on('exit')` 也不再对启动器做无意义 kill。
+  - 新增 `tools/verify-launch.mjs`（**14 项**）：VBS 生成逐条断言（含空格的 `Program Files` 路径、
+    带空格的 `--user-data-dir`、参数含引号时的 `""` 转义、`Run` 的可见样式=1/不等待）+ 假 CDP
+    （HTTP `/json/list` + 真 WS 帧）验证窗口自查的三种结局（可见 / 最小化 / 不可达）。
+    这条测试当场抓出一个真 bug：`writeDetachedLauncher` 假设数据目录已存在，**全新安装首次启动会抛错**
+    （已修：先 `mkdirSync`）。`npm test` 现含 4 个套件（23 + 65 + 47 + 14 = 149 项）。
+  - 局限（说清楚）：沙箱终端里**无法验证窗口真的出现**（该环境禁止从 shell 拉起 Chrome：
+    `Start-Process` / `cmd start` / `wscript` 三条路径的 Chrome 都没起来、连 profile 目录都没被创建），
+    所以这条改动靠"启动后自查 + 你实际看一眼"来确认；不行就把设置里 `launchDetached` 设回 `false`
+    即回到老行为。
+
+- v0.6.1：**默认不再抢占你的日常浏览器（`backendMode`）**
+  - 问题：只要桥连着，`onBridgeStatus` 就把后端切成"用户浏览器"，于是**连不需要登录态的页面**
+    也会撞上 P0 的逐站点授权（没在扩展里点过「允许」就直接报"站点未授权"）——
+    实际上插件自拉实例本来没有这层限制，白白绕远了。
+  - 新增设置 `backendMode`（设置页「用哪个浏览器」，三档）：
+    - `auto`（默认）= 默认用**插件自拉实例**（独立窗口 + 独立 profile，不碰你的浏览器、不受逐站点授权限制）；
+      只有确实需要"你的登录态"时，由 agent 显式 `browser_open { use: "user" }` 切到你的日常浏览器。
+    - `plugin` = 只用插件实例。
+    - `user` = 与 v0.6.0 旧行为一致：默认就在你的浏览器里操作。
+  - `browser_open` 新增 `use` 参数，返回值里带上实际用的是哪个浏览器（`browser` 字段）。
+  - 桥连着不再等于"必须用它"；切后端会重建标签页清单（两个浏览器的 tab 列表本来就不通用）。
+  - 迁移：**默认值保持"自带实例"，因此升级后你原来的 `user` 行为会变**。若你就是要 agent 一直在
+    你的浏览器里干活，去设置页点一下「我的浏览器」（或把 `settings.json` 的 `backendMode` 设为 `"user"`）。
+
+- v0.6.0：**P1 —— 真输入接管（点击/打字/按键/滚轮/上传）**
+  - 扩展新增「允许操作」开关（默认关、持久化）：关着时 `Input.*` 与 `DOM.setFileInputFiles`
+    一律拒绝并提示去弹窗打开；打开后经 `chrome.debugger` 注入（`isTrusted:true`），
+    拟人鼠标轨迹照旧生效。前提仍是逐站点授权 —— 没授权的站点连调试器都附加不上。
+  - **输入前自动把目标标签/窗口置前**（`chrome.tabs.update` + `chrome.windows.update`，
+    并等焦点真正到手 + 300ms 稳定期）：实测后台标签、失焦窗口下 Chrome 会**静默丢弃**鼠标事件，
+    键盘偶尔能过 —— 不置前就会出现"工具说 ok、页面没反应"。只读命令不抢前台。
+  - 开关状态实时回传 host：`/bl/state`、`/bl/bridge`、设置页、观察窗红标（只读→「正在读取」，
+    可操作→「正在操作你的日常浏览器（可点击/打字）」）全部同步。
+  - 弹窗新增「已授权 N 个站点 / 允许操作：开|关」状态行 + 操作成功的绿色提示 + 消息失败自动重试
+    （MV3 SW 休眠时第一条消息会丢，旧版把错误吞了，表现为"点了没反应"）。
+  - host 加固：撤销授权后**清掉本地缓存的 url/标题**（原来会把打码前的真实 URL 留在 `/bl/state` 里）、
+    监听扩展 `detach` 事件作废 sessionId、遇到「会话已失效」自动清 session 重试一次。
+  - 验证：`verify-bridge` 23 + `verify-extension` 65 + `verify-host` 43 = **131 项**，`npm test` 全跑；
+    并在真实 Chrome + 番茄渠道商后台用真点击/真 ctrl+a/真打字跑通（事件全 `isTrusted:true`）。
+  - 仍未做：`chrome.downloads` 接管（`browser_downloads` 在用户浏览器模式下仍指向插件目录）、
+    收窄 `Runtime.evaluate`、与 approval-gate 联动。
+- v0.5.0：**接管你自己的浏览器（P0 只读）—— 扩展路线落地**
+  - 新增 `bridge.js`（WS 桥：只绑 127.0.0.1、token 握手、Origin 只认 `chrome-extension://`、
+    心跳 + 单实例顶替、端口顺延、`bridge.json` 持久化 token）与 `extension/`（MV3 扩展：
+    service worker 当"反向 CDP 客户端"、`chrome.debugger` 转发、弹窗逐站点授权 + 红点角标）。
+  - host 侧零改调用面：`browser.cdp` 直接换成桥对象，17 个工具的 `send/on/alive/close` 语义不变；
+    桥断自动回退插件实例；`browser_close` 在用户浏览器模式下只拆调试器。
+  - P0 硬拒：`Input.*` / `DOM.setFileInputFiles` / `Target.createTarget|closeTarget` /
+    `javascript:` 与 `file:` 导航；未授权站点的 url/title 对 agent 打码。
+  - 设置页新增「用户浏览器」开关（即时生效）+ 端口/token 展示与复制；`/bl/bridge` 路由；
+    `/bl/view` 与 `/bl/state` 带 `backend`，用户浏览器模式下常驻红标。
+  - 验证：`tools/verify-bridge.mjs`（23 项）、`tools/verify-extension.mjs`（41 项，mock chrome 跑真扩展）、
+    `tools/verify-host.mjs`（29 项，真 index.js + 真桥 + 真扩展代码）。`npm test` 全跑。
+  - 未做（P1/P2）：输入接管、下载事件、`Runtime.evaluate` 收窄、与 approval-gate 联动。
 - v0.4.3：**设置页开着时，内嵌面板自动收进独立网页 `/bl/view`**
   - 浮球（v0.4.2）沉底就够好看了，但那块 560px 的窗沉下去等于看不见 —— 所以面板换做法：设置页一开
     就 `foldPanelToStandalone()`（收面板 + 弹独立页），两边各看各的。

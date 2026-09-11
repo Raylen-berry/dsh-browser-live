@@ -8,6 +8,14 @@
 //   · 工具 = 17 个 browser_* 结构化工具（快照/点击/悬停轨迹/输入/上传/滚动/等待/截图/标签页/下载…）；
 //   · 观察窗 = host 侧 /bl/* SSE 帧流 + 前端 client.js 浮动面板（鼠标键盘直接接管）。
 //
+// v0.5.0 起多了一条可选后端（P0 只读）——**接管用户日常浏览器**：
+//   · 扩展路线，见 bridge.js + extension/ + docs/PLAN-user-browser-takeover.md；
+//   · settings.userBridge=true 时 host 起 WS 桥（127.0.0.1:bridgePort），
+//     Chrome 扩展用 chrome.debugger 当"反向 CDP 客户端"，于是 browser.cdp 直接换成桥，
+//     17 个工具的调用面一行未改；
+//   · 扩展侧只放行只读 + 导航（Input.* / 上传 / 标签页增删一律拒绝），逐站点授权；
+//   · 桥一断就自动回退插件自拉实例，行为与 v0.4.3 一致。
+//
 // 与 link: 安装的兼容性：@deepseek-ai/dsh-tools 的 defineTool 按 bg-atelier 找 sharp 的
 // 同款候选路径动态解析（裸 import → DSH_HOME profiles → require.resolve），全部失败
 // 再退回本文件内置的 defineToolLite —— 装载永不因解析姿势而崩。
@@ -29,10 +37,11 @@ import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { BridgeServer, BRIDGE_FILE, DEFAULT_BRIDGE_PORT } from './bridge.js'
 
 export const name = 'dsh-browser-live'
 export const inject = ['tools', 'webServer']
-export const version = '0.4.3'
+export const version = '0.7.0'
 
 // ---------------------------------------------------------------- utilities
 
@@ -90,9 +99,25 @@ const DEFAULT_SETTINGS = Object.freeze({
   extraArgs: '',     // 追加到 Chrome 命令行的空格分隔参数
   proxy: '',         // Chrome --proxy-server，例 http://127.0.0.1:7890 / socks5://127.0.0.1:1080；空=跟随系统
   liveView: 'panel', // panel=DSH 内嵌观察窗；standalone=独立网页 /bl/view（可丢到副屏/全屏）
+  // true（默认）= 用 VBS 启动器把 Chrome 拉起成**独立进程**：脱离 DSH 的父进程/作业对象，
+  // 于是它拥有真实可见的窗口句柄。false = 老行为 `spawn(...,{detached:false})`，
+  // 在部分 Windows 环境（DSH Desktop 自身带作业对象时）拉起的 Chrome 会**没有窗口句柄**，
+  // 表现为"浏览器明明在跑、你也点得到，但屏幕上根本看不到窗口"，只能看观察窗。
+  launchDetached: true,
   maxTabsWarn: 12,
   humanize: true,    // agent 鼠标移动走拟人轨迹（贝塞尔+缓动+抖动）；接管面板的实时转发不受影响
   humanSpeed: 1,     // 轨迹速度倍率（0.3~4）：越大越快越不像人，1≈0.25~0.45s 中等距离
+  userBridge: false, // true=启动"用户日常浏览器"桥（需在 Chrome 里装 extension/ 里的扩展并粘 token）
+  // 默认把 agent 的浏览器操作放在**插件自拉实例**里：那个实例不需要逐站点授权，
+  // 所以"不是要登录的页面"直接 browser_open 打开就行，不用接管用户正在用的浏览器。
+  //   auto   = 默认插件实例；browser_open 显式给 use:'user' 时才去用户的浏览器（要登录态的站点）
+  //   plugin = 只用插件实例
+  //   user   = 默认就用用户的浏览器（与旧行为一致）
+  backendMode: 'auto',
+  // 多浏览器（v0.7）：use:'user' 时用哪个已接入的浏览器。空=任选一个已连接的。
+  // 想"默认就用 Edge 的登录态"就填 'edge'；不改这里也不影响 —— 工具调用可直接 use:'edge'。
+  userDefault: '',
+  bridgePort: DEFAULT_BRIDGE_PORT, // 桥监听端口（127.0.0.1；占用则顺延）
 })
 
 let settings = { ...DEFAULT_SETTINGS }
@@ -113,8 +138,13 @@ function sanitizeSettings(raw) {
     if (typeof raw.extraArgs === 'string' && raw.extraArgs.length < 2000) s.extraArgs = raw.extraArgs
     if (typeof raw.proxy === 'string' && raw.proxy.length < 512) s.proxy = raw.proxy.trim()
     if (raw.liveView === 'standalone' || raw.liveView === 'panel') s.liveView = raw.liveView
+    if (typeof raw.launchDetached === 'boolean') s.launchDetached = raw.launchDetached
     if (typeof raw.humanize === 'boolean') s.humanize = raw.humanize
     if (Number.isFinite(raw.humanSpeed)) s.humanSpeed = clamp(raw.humanSpeed, 0.3, 4)
+    if (typeof raw.userBridge === 'boolean') s.userBridge = raw.userBridge
+    if (raw.backendMode === 'auto' || raw.backendMode === 'plugin' || raw.backendMode === 'user') s.backendMode = raw.backendMode
+    if (typeof raw.userDefault === 'string' && (raw.userDefault === '' || BROWSER_KINDS.includes(raw.userDefault))) s.userDefault = raw.userDefault
+    if (Number.isFinite(raw.bridgePort)) s.bridgePort = clamp(Math.round(raw.bridgePort), 1024, 65535)
   }
   return s
 }
@@ -190,6 +220,30 @@ async function loadWs() {
   } catch { /* ignore */ }
   for (const c of candidates) {
     try { const m = await import(c); const W = m && (m.default || m); if (typeof W === 'function') return W } catch { /* next */ }
+  }
+  return null
+}
+
+/** 解析 'ws' 包本体（需要 WebSocketServer 起桥），与 loadWs 同款候选路径。 */
+async function loadWsModule() {
+  const candidates = ['ws']
+  try { candidates.push(pathToFileURL(path.join(dshHome(), 'profiles', 'node_modules', 'ws', 'index.js')).href) } catch { /* ignore */ }
+  try {
+    const appNm = path.join(path.dirname(process.execPath), '..', '..')
+    candidates.push(pathToFileURL(path.join(appNm, 'ws', 'index.js')).href)
+  } catch { /* ignore */ }
+  try {
+    if (process.env.APPDATA) candidates.push(pathToFileURL(path.join(process.env.APPDATA, 'dsh-desktop', 'harness', 'profiles', 'node_modules', 'ws', 'index.js')).href)
+  } catch { /* ignore */ }
+  for (const c of candidates) {
+    try {
+      const m = await import(c)
+      const W = m && (m.default || m)
+      const WSS = m?.WebSocketServer || W?.WebSocketServer
+      if (typeof W === 'function' && typeof WSS === 'function') return { WebSocket: W, WebSocketServer: WSS }
+      // CJS 具名导出：{ WebSocket, WebSocketServer }
+      if (typeof m?.WebSocket === 'function' && typeof WSS === 'function') return { WebSocket: m.WebSocket, WebSocketServer: WSS }
+    } catch { /* next */ }
   }
   return null
 }
@@ -302,20 +356,197 @@ const KEY_DEFS = {
 const KEY_LOOKUP = {}
 for (const [k, v] of Object.entries(KEY_DEFS)) { KEY_LOOKUP[k.toLowerCase()] = v; KEY_LOOKUP[k] = v }
 
+/**
+ * DSH GUI 的"已认证 URL"（带一次性 launch token 的 `/?token=…`）。
+ * 为什么需要它：`/bl/*` 这些插件路由不校验身份，但 GUI 根路径由 dsh-client-connection 把守
+ * （`authorizeIndex`：URL 上的 launch token 换签名 cookie，否则 401 "dsh web authentication required"）。
+ * 插件 Chrome 是独立 profile，本来没有任何凭据 —— 所以在那个浏览器里看 GUI 必然被拒。
+ * 这里不绕过门禁：走宿主自己的接口 `connection.authenticatedUrl(base)`（dsh-web-app 打印 URL 用的同一个），
+ * 拿到 URL 后在目标浏览器里访问一次，token 就换成正常 cookie（303 落地），后续就都能开。
+ */
+let guiAuthUrl = null
+let guiAuthApi = null   // inject(["connection"]) 拿到的该服务引用
+
+function guiUrlFromCtx(c) {
+  try {
+    if (!c || !c.connection || typeof c.connection.authenticatedUrl !== 'function') return null
+    const port = (c.webServer && c.webServer.port) || (process.env.DSH_WEB_URL ? Number(new URL(process.env.DSH_WEB_URL).port) : 0)
+    if (!port) return null
+    return c.connection.authenticatedUrl('http://127.0.0.1:' + port)
+  } catch { return null }
+}
+
+/** 取（并缓存）已认证 GUI URL；拿不到就回 null，由调用方给出可读原因。 */
+function guiAuthUrlNow() {
+  if (!guiAuthApi) return guiAuthUrl
+  const u = guiUrlFromCtx(guiAuthApi)
+  if (u) guiAuthUrl = u
+  return guiAuthUrl
+}
+
+/**
+ * 每浏览器一份会话（v0.7 多浏览器）。
+ *
+ * 为什么要有这个：桥（bridge.js）现在能同时挂 Chrome 和 Edge 两条扩展连接，
+ * 而 tabs / selected / cdp 这些状态**必须按浏览器分开** —— 共用一个 browser.tabs
+ * 会让"在 Edge 上 snapshot、却对 Chrome 的标签页点击"这种错位悄悄发生。
+ *
+ * 兼容策略：`browser` 这个老单例仍然存在，并且**始终是当前活跃会话的视图**
+ * （`viewOf()` 把会话字段拷进去），所以 19 个工具里那 100 多处 `browser.tabs`
+ * 之类的写法一行都不用改；只有"会话边界"（选会话、刷新标签、附加会话）需要传 s。
+ */
+const BROWSER_KINDS = ['chrome', 'edge', 'brave', 'opera', 'unknown']
+const KIND_LABEL = { chrome: 'Chrome', edge: 'Edge', brave: 'Brave', opera: 'Opera', unknown: '未知浏览器' }
+const kindLabel = (k) => KIND_LABEL[k] || (k ? String(k) : '未知浏览器')
+
+const makeSession = (kind, { backend = 'plugin', userClosed = false } = {}) => ({
+  kind, backend, userClosed,
+  cdp: null, tabs: [], selected: null, lastPos: null,
+  meta: { vw: 1280, vh: 800 },
+})
+
 const browser = {
   proc: null,
-  cdp: null,          // browser 级连接（flatten 会话都走它）
+  detachedLaunch: false, // true=Chrome 由 VBS 启动器拉成独立进程（proc 只是启动器，别拿它当 Chrome）
+  cdp: null,          // 当前活跃会话的传输（插件实例=local Cdp；用户浏览器=bridge 的 per-kind Cdp）
+  local: null,        // 插件自拉 Chrome 的 Cdp 连接（切到用户浏览器时保留，断开可回退）
+  bridge: null,       // BridgeServer 实例（settings.userBridge=true 才创建）
+  backend: 'plugin',  // 'plugin' | 'user'（当前活跃会话的性质）
+  userClosed: false,  // 用户浏览器模式下用户主动 browser_close：暂停而不关他的浏览器
   port: 0,
-  tabs: [],           // {targetId, sessionId, url, title, type}
+  tabs: [],           // {targetId, sessionId, url, title, type} —— 当前活跃会话的视图
   selected: null,     // targetId
   meta: { vw: 1280, vh: 800 },
   frameSeq: 0,
   actionLog: [],      // {t, label}
   panelWanted: false, // 客户端轮询：true 时自动弹观察窗
-  downloads: [],      // {file, url, state, t}
+  downloads: [],      // {file, url, state, t}（仅插件自拉实例有 CDP 下载事件）
   dying: false,
   WS: null,           // ws 包构造器（apply 时解析；null=退回全局 WebSocket）
   lastPos: null,      // 拟人轨迹的"笔尖"：上一次鼠标落点 {x,y}（CSS px）
+  sessions: new Map(),// Map<kind, session>；'plugin' 键 = 插件自拉实例
+  session: null,      // 当前活跃会话
+  primary: null,      // 插件自拉实例的 local Cdp（= sessions.get('plugin').cdp）
+}
+
+/** 把会话字段拷进老单例，让所有 `browser.xxx` 读法继续成立。 */
+function viewOf(s) {
+  browser.session = s
+  browser.backend = s.backend
+  browser.userClosed = s.userClosed
+  browser.tabs = s.tabs
+  browser.selected = s.selected
+  browser.meta = s.meta
+  browser.lastPos = s.lastPos
+  browser.cdp = s.cdp
+}
+
+/** 取会话；不存在则建（并接上可用的传输）。 */
+function sessionOf(kind) {
+  const k = kind || 'plugin'
+  let s = browser.sessions.get(k)
+  if (s) {
+    // 传输可能是后到的（桥刚连上 / 插件实例刚起来），每次都重新兜一次
+    if (!s.cdp) s.cdp = k === 'plugin' ? browser.primary : (browser.bridge ? browser.bridge.cdpFor(k) : null)
+    return s
+  }
+  s = makeSession(k, k === 'plugin' ? { backend: 'plugin' } : { backend: 'user' })
+  s.cdp = k === 'plugin' ? browser.primary : (browser.bridge ? browser.bridge.cdpFor(k) : null)
+  browser.sessions.set(k, s)
+  return s
+}
+
+const isUserKind = (k) => k !== 'plugin'
+/** 是不是"我们认识的浏览器种类"（chrome/edge/brave/opera/unknown）。
+ *  与 isUserKind 的区别：后者只回答"是不是插件自带实例"，所以 'firefox' 也会过关；
+ *  校验 use 取值时必须用这个，否则拼错的名字会被当成"未接入的浏览器"去报错。 */
+const isKnownKind = (k) => BROWSER_KINDS.includes(k)
+const aliveOf = (s) => !!(s && s.cdp && s.cdp.alive && !(s.backend === 'user' && s.userClosed))
+
+/** 已接入的浏览器 kind 列表（按固定顺序，便于日志与 UI 稳定）。 */
+function connectedKinds() {
+  const b = browser.bridge
+  if (!b || !b.alive) { if (process.env.BL_TRACE) console.log('[trace.kinds] bridge none/alive=', !!b && b.alive); return [] }
+  let ks = []
+  try {
+    ks = typeof b.kinds === 'function' ? b.kinds() : (b.list() || []).map((x) => x.kind)
+  } catch { ks = [] }
+  const out = (Array.isArray(ks) ? ks : []).filter(Boolean).sort((a, c) => BROWSER_KINDS.indexOf(a) - BROWSER_KINDS.indexOf(c))
+  if (process.env.BL_TRACE) console.log('[trace.kinds]', JSON.stringify(out), 'connected=', b.connected)
+  return out
+}
+
+function browsersView() {
+  const live = new Set(connectedKinds())
+  // 已接入但还没被任何调用碰过的浏览器也要列出来 —— 否则设置页只能显示"你用过的"，
+  // 用户刚装完 Edge 扩展时会看到一台都没接（明明连上了）。
+  const kinds = new Set([...browser.sessions.keys(), ...live])
+  return [...kinds].map((kind) => {
+    const s = browser.sessions.get(kind)
+    return {
+      kind,
+      label: isUserKind(kind) ? kindLabel(kind) : '插件自带实例',
+      connected: isUserKind(kind) ? live.has(kind) : !!(browser.primary && browser.primary.alive),
+      active: !!s && browser.session === s,
+      tabs: s ? s.tabs.length : 0,
+      selected: (s && s.tabs.find((t) => t.targetId === s.selected)?.url) || '',
+    }
+  })
+}
+
+/**
+ * 这台调用用哪个浏览器。优先级：显式 use > lastUse（上次用的）> settings.backendMode > 插件实例。
+ *   use:'plugin'         → 插件自拉实例（免授权、可新开页）
+ *   use:'chrome'|'edge'  → 指定用户的那个浏览器（必须连着；连不上就明确报错，不静默换车）
+ *   use:'user'           → settings.userDefault 指定的那个，没指定就用任一已连接的
+ *   use 缺省             → 沿用上一次用的；没有上一次就看 backendMode（user 档默认用你的浏览器）
+ */
+let lastUse = ''
+async function useSession(use) {
+  const u0 = typeof use === 'string' ? use.trim().toLowerCase() : ''
+  // 不给 use：沿用上一次（lastUse）；冷启动才看 backendMode。避免"上一次刚在 Edge 里读完，
+  // 这一次没写 use 就悄悄跑回插件实例"这种错位。
+  const u = u0 || lastUse || (settings.backendMode === 'user' ? 'user' : 'plugin')
+  if (u === 'plugin' || u === 'local') { lastUse = 'plugin'; const s = sessionOf('plugin'); return viewOf(s), s }
+  if (u === 'user') {
+    const ks = connectedKinds()
+    if (!ks.length) throw new Error('用户浏览器桥未连接：先在 Chrome/Edge 的扩展弹窗里「连接」，或改用 use:"plugin"')
+    const want = ks.includes(settings.userDefault) ? settings.userDefault : ks[0]
+    lastUse = want
+    const s = sessionOf(want); return viewOf(s), s
+  }
+  if (u === 'auto') {
+    // auto：桥连着就用你的浏览器，否则插件实例
+    const ks = connectedKinds()
+    const k = ks.includes(settings.userDefault) ? settings.userDefault : ks[0]
+    lastUse = k || 'plugin'
+    const s = sessionOf(k || 'plugin')
+    return viewOf(s), s
+  }
+  // 先看"是不是已知浏览器种类"（这条判断必须排在"未接入"之前）：
+  // 已接入的浏览器（Chrome/Edge）没连上时给"怎么连上"的指引；
+  // 连种类都不认识（比如 firefox）就是参数写错了，要列出合法取值。
+  if (!isKnownKind(u)) {
+    throw new Error(`use 只能是 'plugin' | 'user' | 'auto' | ${BROWSER_KINDS.map((k) => `'${k}'`).join(' | ')}（收到 "${u}"）`)
+  }
+  const ks = connectedKinds()
+  if (!ks.includes(u)) {
+    // 没写 use、只是"沿用上一次"的那台已经掉线 → 退回插件实例，别让后续调用一路报错。
+    // 显式写了 use:'edge' 掉线时**不能**这样兜底：那是"必须用这台"的明示意图，只能报错。
+    if (!u0 && lastUse && u === lastUse) {
+      noteAction(`${kindLabel(u)} 已掉线，这次改用插件自带实例`)
+      lastUse = 'plugin'
+      const ps = sessionOf('plugin')
+      return viewOf(ps), ps
+    }
+    throw new Error(ks.length
+      ? `${kindLabel(u)} 未接入（当前连着：${ks.map(kindLabel).join('、')}）。在 ${kindLabel(u)} 里装好扩展并点「连接」，或改用 use:"${ks[0]}"`
+      : `${kindLabel(u)} 未接入：该浏览器里的 DSH Browser Bridge 扩展还没连接。` +
+        '装法：打开 ' + (u === 'edge' ? 'edge://extensions' : 'chrome://extensions') + ' → 开发者模式 → 加载已解压的扩展程序 → 选插件目录下的 extension → 粘 token 点连接')
+  }
+  lastUse = u
+  const s = sessionOf(u)
+  return viewOf(s), s
 }
 
 async function probePort(port) {
@@ -363,10 +594,95 @@ async function attachCdp(wsUrl) {
   try {
     await cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: DOWNLOADS_DIR(), eventsEnabled: true })
   } catch { /* 老版本浏览器没有 eventsEnabled */ }
-  browser.cdp = cdp
+  browser.local = cdp
+  browser.primary = cdp
+  // 插件自拉实例的会话也就是这条连接
+  const sp = browser.sessions.get('plugin')
+  if (sp) sp.cdp = cdp
+  // 正在驱动用户浏览器时不要把插件实例顶上来；桥断了 onBridgeStatus 会把 local 接回去
+  if (browser.session && browser.session.kind === 'plugin') browser.cdp = cdp
+  return cdp
+}
+
+/**
+ * 用 VBS 启动器把 Chrome 拉成"没有父作业对象的独立进程"。
+ * 为什么不是 spawn 的 detached:true：那个只保证 Node 不等它，Windows 上子进程照样继承/留在
+ * 同一作业对象里；实测在 DSH Desktop 这条链上拉起的 Chrome **拿不到窗口句柄**（窗口不注册）。
+ * 独立进程 + 可见窗口是这台机器上唯一稳定出窗口的路径（已由同类启动方式的对照实验支持）。
+ * 启动器脚本写在数据目录里（极小，VBScript；不引入任何依赖），失败即当返回值 false 由调用方回退。
+ */
+export function writeDetachedLauncher(exe, args) {
+  mkdirSync(BASE_DIR(), { recursive: true })   // 首次启动/全新数据目录时这里还不存在
+  const vbs = path.join(BASE_DIR(), 'launch-chrome-detached.vbs')
+  const lit = (s) => '"' + String(s).replace(/"/g, '""') + '"'
+  const cmd = [lit(exe), ...args.map(lit)].join(' ')
+  const body = [
+    "' dsh-browser-live：把 Chrome 拉成独立进程，使其拥有真实窗口（由插件自动生成，可删）",
+    'Set sh = CreateObject("WScript.Shell")',
+    'sh.CurrentDirectory = ' + lit(path.dirname(exe)),
+    'sh.Run ' + lit(cmd) + ', 1, False',
+    '',
+  ].join('\r\n')
+  writeFileSync(vbs, body, 'utf8')
+  return vbs
+}
+
+/**
+ * 启动后自查"窗口到底存不存在"：CDP 的 Browser.getWindowForTarget/getWindowBounds 是 Chrome
+ * 自己报的，不依赖我这边能不能枚举 Win32 窗口 —— 所以把结论写进观察窗动作条，用户一眼可判。
+ */
+export async function reportWindowState(port) {
+  try {
+    const list = await fetch(`http://127.0.0.1:${port}/json/list`).then((r) => r.json())
+    const page = (list || []).find((t) => t.type === 'page' && t.webSocketDebuggerUrl)
+    if (!page) return '⚠ 启动后自查：拿不到页面目标，无法确认窗口'
+    const { WebSocket } = await loadWs()
+    if (!WebSocket) return '⚠ 启动后自查：WebSocket 不可用'
+    const ws = new WebSocket(page.webSocketDebuggerUrl)
+    let id = 0
+    const pending = new Map()
+    ws.onmessage = (ev) => { try { const m = JSON.parse(ev.data); if (m.id && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id) } } catch { /* ignore */ } }
+    await new Promise((res, rej) => { ws.onopen = res; ws.onerror = () => rej(new Error('ws error')); setTimeout(() => rej(new Error('ws timeout')), 4000) })
+    const send = (method, params) => new Promise((res, rej) => {
+      const mid = ++id
+      pending.set(mid, (m) => (m.error ? rej(new Error(m.error.message)) : res(m.result)))
+      ws.send(JSON.stringify({ id: mid, method, params }))
+      setTimeout(() => { if (pending.has(mid)) { pending.delete(mid); rej(new Error(mid + ': timeout')) } }, 4000)
+    })
+    try {
+      const { windowId } = await send('Browser.getWindowForTarget', { targetId: page.id })
+      const bounds = await send('Browser.getWindowBounds', { windowId })
+      const b = bounds?.bounds || {}
+      const visible = b.windowState !== 'minimized'
+      // 顺手保证"可见且够大"：windowState 只认 normal/maximized，尺寸给到设置里的 windowSize
+      try {
+        const [w, h] = String(settings.windowSize || '1440,900').split(',').map((n) => Number(n) || 0)
+        if (w > 400 && h > 300) await send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal', width: w, height: h } })
+      } catch { /* 老版本 Chrome 不支持就跳过 */ }
+      ws.close()
+      return (visible ? '✓ 启动后自查：窗口存在且可见' : '⚠ 启动后自查：窗口存在但被最小化')
+        + '（windowId=' + windowId + '，state=' + (b.windowState || '?') + '，' + (b.width || '?') + 'x' + (b.height || '?') + '）'
+        + (visible ? '，屏幕上看不到就是被别的窗口盖住了' : '')
+    } finally { try { ws.close() } catch { /* ignore */ } }
+  } catch (e) { return '⚠ 启动后自查窗口失败：' + String(e?.message || e) }
 }
 
 async function launch() {
+  // 用户浏览器会话：不拉任何进程，直接用扩展那条链路
+  const cur = browser.session
+  if (cur && isUserKind(cur.kind)) {
+    cur.cdp = browser.bridge ? browser.bridge.cdpFor(cur.kind) : null
+    if (cur.cdp && cur.cdp.alive) {
+      cur.userClosed = false
+      viewOf(cur)
+      await refreshTabs(cur).catch(() => {})
+      return
+    }
+  }
+  // 走到这里就是"要插件自拉实例"：先把它设成活跃会话，再拉进程（进程/端口这些资源
+  // 都属于插件实例，跟用户浏览器那条链路无关）。
+  const ps = sessionOf('plugin')
+  if (browser.session !== ps) viewOf(ps)
   mkdirSync(BASE_DIR(), { recursive: true })
   mkdirSync(CHROME_PROFILE(), { recursive: true })
   mkdirSync(DOWNLOADS_DIR(), { recursive: true })
@@ -380,7 +696,7 @@ async function launch() {
       if (ws) {
         browser.port = last.port
         await attachCdp(ws)
-        await refreshTabs().catch(() => {})
+        await refreshTabs(ps).catch(() => {})
         console.log(`[dsh-browser-live] 接管已运行中的浏览器（:${last.port}）`)
         return
       }
@@ -403,84 +719,156 @@ async function launch() {
     ...(settings.headless ? ['--headless=new'] : []),
     'about:blank',
   ]
-  browser.proc = spawn(exe, args, { stdio: 'ignore', detached: false })
-  browser.proc.on('exit', () => { browser.proc = null })
+  let launched = false
+  if (settings.launchDetached !== false) {
+    try {
+      const vbs = writeDetachedLauncher(exe, args)
+      const wscriptExe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'wscript.exe')
+      browser.proc = spawn(wscriptExe, [vbs], { stdio: 'ignore', windowsHide: true })
+      browser.proc.on('exit', () => { browser.proc = null })
+      browser.detachedLaunch = true
+      launched = true
+    } catch (e) {
+      console.warn('[dsh-browser-live] 独立启动器不可用，回退自身子进程:', e?.message)
+      browser.detachedLaunch = false
+    }
+  }
+  if (!launched) {
+    browser.proc = spawn(exe, args, { stdio: 'ignore', detached: false })
+    browser.proc.on('exit', () => { browser.proc = null })
+    browser.detachedLaunch = false
+  }
   let ws = null
   for (let i = 0; i < 60; i++) {
     await sleep(250)
     ws = await probePort(port)
     if (ws) break
   }
-  if (!ws) { try { browser.proc.kill() } catch {}; throw new Error('Chrome 未响应 CDP 端口（可能被安全软件拦截）') }
+  if (!ws) {
+    try { if (browser.proc) browser.proc.kill() } catch {}
+    throw new Error('Chrome 未响应 CDP 端口（可能被安全软件拦截）')
+  }
   browser.port = port
   writeFileSync(STATE_FILE(), JSON.stringify({ port }), 'utf8')
   await attachCdp(ws)
-  console.log(`[dsh-browser-live] 浏览器已启动（${path.basename(exe)} :${port}）`)
+  console.log(`[dsh-browser-live] 浏览器已启动（${path.basename(exe)} :${port}${browser.detachedLaunch ? ' · 独立进程（有独立窗口）' : ' · 宿主子进程'}）`)
+  // 让窗口可见性变成"可观测事实"，而不是靠用户反馈
+  reportWindowState(port).then((msg) => noteAction('🪟 ' + msg)).catch(() => {})
 }
 
-async function shutdown(kill) {
+async function shutdown(kill, only) {
+  const s = only || browser.session || sessionOf('plugin')
+  // 用户浏览器会话：只拆调试器，绝不关人家的浏览器
+  if (isUserKind(s.kind)) {
+    const sids = s.tabs.map((t) => t.sessionId).filter(Boolean)
+    for (const sid of sids) {
+      try { await (s.cdp || browser.bridge)?.send('Target.detachFromTarget', { sessionId: sid }, undefined, 5000) } catch { /* 已经掉了 */ }
+    }
+    s.userClosed = true
+    s.tabs = []; s.selected = null
+    if (browser.session === s) viewOf(s)
+    noteAction(`已断开对 ${kindLabel(s.kind)} 的读取（浏览器本身没关）`)
+    return
+  }
   browser.dying = true
-  try { browser.cdp?.send('Browser.close', {}).catch(() => {}) } catch {}
+  try { s.cdp?.send('Browser.close', {}).catch(() => {}) } catch {}
   await sleep(150)
-  try { if (kill && browser.proc) browser.proc.kill() } catch {}
-  try { browser.cdp?.close() } catch {}
-  browser.cdp = null; browser.proc = null; browser.tabs = []; browser.selected = null
+  // 独立启动时 proc 是启动器，杀它没用；Browser.close（上面那条 CDP）才是真正关 Chrome 的手段
+  try { if (kill && browser.proc && !browser.detachedLaunch) browser.proc.kill() } catch {}
+  try { s.cdp?.close() } catch {}
+  s.cdp = null; s.tabs = []; s.selected = null
+  browser.primary = null; browser.local = null; browser.proc = null
+  if (browser.session === s) viewOf(s)
   browser.dying = false
 }
 
-function alive() {
-  return !!(browser.cdp && browser.cdp.alive)
-}
+function alive() { return aliveOf(browser.session) }
 
-async function refreshTabs() {
-  const { targetInfos } = await browser.cdp.send('Target.getTargets', {})
+async function refreshTabs(s0) {
+  const s = s0 || browser.session || sessionOf('plugin')
+  if (!s.cdp) throw new Error(`${isUserKind(s.kind) ? kindLabel(s.kind) : '插件自带实例'} 未连接`)
+  const { targetInfos } = await s.cdp.send('Target.getTargets', {})
   const pages = targetInfos.filter((t) => t.type === 'page')
   // 丢弃已消失的本地 tab 记录
-  browser.tabs = browser.tabs.filter((t) => pages.some((p) => p.targetId === t.targetId))
+  s.tabs = s.tabs.filter((t) => pages.some((p) => p.targetId === t.targetId))
   for (const p of pages) {
-    if (!browser.tabs.find((t) => t.targetId === p.targetId)) browser.tabs.push({ targetId: p.targetId, sessionId: null, url: p.url || '', title: p.title || '' })
-    else { const t = browser.tabs.find((x) => x.targetId === p.targetId); t.url = p.url || t.url; t.title = p.title || t.title }
+    const allowed = p.allowed !== false          // 本地 CDP 没有这个字段 → 视为允许
+    const fresh = { targetId: p.targetId, sessionId: null, url: p.url || '', title: p.title || '', allowed }
+    const t = s.tabs.find((x) => x.targetId === p.targetId)
+    if (!t) { s.tabs.push(fresh); continue }
+    t.allowed = allowed
+    if (!allowed) {
+      // 扩展打码时必须**覆盖**本地缓存：否则被撤销授权后 url 会留在 host 里（隐私泄漏）
+      t.url = ''; t.title = '(未授权站点)'
+    } else if (t.url === '' && t.title === '(未授权站点)') {
+      t.url = p.url || ''; t.title = p.title || ''    // 刚从打码恢复，别把打码值当"旧值"留着
+    } else {
+      t.url = p.url || t.url; t.title = p.title || t.title
+    }
+    if (!allowed) t.sessionId = null
   }
-  if (!browser.tabs.length || (browser.selected && !browser.tabs.find((t) => t.targetId === browser.selected))) browser.selected = browser.tabs[0]?.targetId || null
-  return browser.tabs
+  if (!s.tabs.length || (s.selected && !s.tabs.find((t) => t.targetId === s.selected))) s.selected = s.tabs[0]?.targetId || null
+  if (browser.session === s) viewOf(s)
+  return s.tabs
 }
 
-async function waitTargetGone(targetId, tries = 12) {
+async function waitTargetGone(targetId, tries = 12, s0) {
+  const s = s0 || browser.session
   // Target.closeTarget 是异步生效的：轮询确认它真的从 getTargets 消失，避免"刚关完就列表"竞态
   for (let i = 0; i < tries; i++) {
-    await refreshTabs()
-    if (!browser.tabs.some((t) => t.targetId === targetId)) return
+    await refreshTabs(s)
+    if (!s.tabs.some((t) => t.targetId === targetId)) return
     await sleep(120)
   }
 }
 
-async function attachTab(tab) {
+/** 会话 id 归一：用户浏览器的 sessionId 一律带 `<kind>:` 前缀。
+ *  为什么必做：桥靠前缀把请求/事件路由到正确的那条扩展连接（docs/MULTI-BROWSER.md §3）。
+ *  `Target.attachToTarget` 的回包里本来就带着前缀（扩展加的），但**不能假设**这一点 ——
+ *  否则一旦某条路径把裸 id 存进 browser.tabs，事件回来时就认不出是哪台浏览器了。
+ *  幂等：已带前缀的直接返回。插件实例（本地 CDP）不加前缀，不受影响。 */
+function prefixSid(s, sid) {
+  const id = String(sid || '')
+  if (!id || !s || !isUserKind(s.kind)) return id
+  return id.startsWith(s.kind + ':') ? id : `${s.kind}:${id}`
+}
+
+async function attachTab(tab, s0) {
   if (tab.sessionId) return tab
-  const { sessionId } = await browser.cdp.send('Target.attachToTarget', { targetId: tab.targetId, flatten: true })
+  const s = s0 || browser.session
+  const att = await s.cdp.send('Target.attachToTarget', { targetId: tab.targetId, flatten: true })
+  const sessionId = prefixSid(s, att && att.sessionId)
   tab.sessionId = sessionId
-  const cdp = browser.cdp
+  // 注意：事件监听挂在**本会话自己的传输**上，且闭包持有本会话的 sessionId —— 这样
+  // Chrome 与 Edge 同时在用时，事件不会串到另一个浏览器去。
+  const cdp = s.cdp
   await cdp.send('Page.enable', {}, sessionId).catch(() => {})
   await cdp.send('Runtime.enable', {}, sessionId).catch(() => {})
   await cdp.send('DOM.enable', {}, sessionId).catch(() => {})
   try { await cdp.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: DOWNLOADS_DIR(), eventsEnabled: true }, sessionId) } catch {}
   // 标签页 URL/标题变化 → 同步状态
   cdp.on('Page.javascriptDialogOpening', (p) => {
-    if (p.sessionId === sessionId) noteAction('⚠ 页面弹出对话框：' + (p.message || p.type))
+    if (p.sessionId === sessionId) noteAction(`⚠ ${kindLabel(s.kind)} 页面弹出对话框：` + (p.message || p.type))
   })
   return tab
 }
 
-async function selectedTab() {
-  if (!alive()) throw new Error('浏览器未运行；先 browser_open')
-  await refreshTabs()
-  if (!browser.tabs.length) {
-    const { targetId } = await browser.cdp.send('Target.createTarget', { url: 'about:blank' })
-    browser.tabs.push({ targetId, sessionId: null, url: 'about:blank', title: '' })
-    browser.selected = targetId
+async function selectedTab(s0) {
+  const s = s0 || browser.session
+  if (!aliveOf(s)) throw new Error('浏览器未运行；先 browser_open')
+  await refreshTabs(s)
+  if (!s.tabs.length) {
+    if (isUserKind(s.kind)) {
+      throw new Error(`${kindLabel(s.kind)} 里没有可用标签页：先在那个浏览器里打开一个页面，并在扩展弹窗里点「允许」该站点`)
+    }
+    const { targetId } = await s.cdp.send('Target.createTarget', { url: 'about:blank' })
+    s.tabs.push({ targetId, sessionId: null, url: 'about:blank', title: '' })
+    s.selected = targetId
   }
-  if (!browser.selected) browser.selected = browser.tabs[0].targetId
-  const tab = browser.tabs.find((t) => t.targetId === browser.selected)
-  await attachTab(tab)
+  if (!s.selected) s.selected = s.tabs[0].targetId
+  const tab = s.tabs.find((t) => t.targetId === s.selected)
+  await attachTab(tab, s)
+  if (browser.session === s) viewOf(s)
   return tab
 }
 
@@ -683,19 +1071,41 @@ function brief(args) {
 }
 const txt = (t) => [{ type: 'text', text: t }]
 
+const USE_PROP = {
+  type: 'string',
+  description: "可选，这次调用用哪个浏览器：'plugin'=插件自带实例（免授权，冷启动默认）；'chrome'/'edge'=你的日常浏览器（需该浏览器扩展已连接）；'user'=settings.userDefault 指定的那个；'auto'=桥连着就用你的浏览器。"
+    + "不填=沿用上一次调用用的那个（避免相邻两次调用莫名换浏览器）；要你的登录态（后台、飞书、公司系统）时显式写 'edge' 或 'chrome'。",
+}
+
 function makeTool(definer) {
   /** 统一注册入口：lock + action 日志 + 自动拉起浏览器 */
-  function tool({ name: tname, description, parameters, execute, autostart = true }) {
+  function tool({ name: tname, description, parameters, execute, autostart = true, noUse = false }) {
     return definer({
       name: tname,
       description,
-      parameters,
+      // use 统一在这里注入：工具各自只需要读 args.use（不用每个都抄一遍 schema）
+      parameters: noUse ? (parameters || {}) : { use: USE_PROP, ...(parameters || {}) },
       output: { schema: { type: 'string' }, render: (_a, v) => txt(typeof v === 'string' ? v : safeJson(v)) },
       presentCall: (args) => ({ card: 'generic', title: tname, kind: 'other', rawInput: args }),
       async execute(args, exec) {
         return withLock(async () => {
-          try {
-            if (!alive()) {
+          const once = async () => {
+            let s = browser.session
+            // browser_open 自己会 useSession + launch，所以这里不要抢在它前面拦下来 ——
+            // 否则 browser_close 之后（userClosed=true，会话还在但"已断开"）再 open 会被这层
+            // 守卫直接判成"未接入"，永远接不回去。其它工具则照旧在入口把会话定好。
+            let handled = false
+            if (!noUse && tname !== 'browser_open') s = await useSession(args.use)
+            else if (tname === 'browser_open') handled = true
+            if (!aliveOf(s) && !handled) {
+              if (isUserKind(s.kind)) {
+                // 用户的浏览器不能被"拉起"：没连上就只有明确报错，绝不静默换到插件实例去
+                return safeJson({
+                  ok: false,
+                  error: `${kindLabel(s.kind)} 未接入或已断开：扩展没在跑，或你在弹窗里断开了`,
+                  hint: `在 ${kindLabel(s.kind)} 里点扩展图标 → 确认状态是「已连接」；要改用插件自带实例就传 use:"plugin"`,
+                })
+              }
               if (!autostart) return safeJson({ ok: false, error: '浏览器未运行' })
               browser.panelWanted = true   // 冷启动才请求弹观察窗（客户端 ack 后清除）
               await launch()
@@ -703,8 +1113,21 @@ function makeTool(definer) {
             noteAction(tname + ' ' + brief(args))
             const r = await execute(args, exec || {})
             return typeof r === 'string' ? r : safeJson(r)
+          }
+          try {
+            return await once()
           } catch (e) {
-            return safeJson({ ok: false, error: String(e?.message || e), note: '本次调用失败；若浏览器掉线会自动在下次调用重连，必要时先 browser_open' })
+            const msg = String(e?.message || e)
+            // 用户浏览器：扩展侧会话可能已经没了（MV3 SW 重启 / 调试器被 DevTools 抢走 /
+            // 标签页重载），而 host 的 tabs 还记着旧 sessionId —— 清一次再重试。
+            const s = browser.session
+            if (s && isUserKind(s.kind) && /会话已失效|未附加|session/i.test(msg)) {
+              for (const t of s.tabs) t.sessionId = null
+              try { return await once() } catch (e2) {
+                return safeJson({ ok: false, error: String(e2?.message || e2), note: `重新附加后仍失败：在 ${kindLabel(s.kind)} 的扩展弹窗里确认该站点已「允许」，或标签页是否被关闭` })
+              }
+            }
+            return safeJson({ ok: false, error: msg, note: '本次调用失败；若浏览器掉线会自动在下次调用重连，必要时先 browser_open' })
           }
         })
       },
@@ -725,32 +1148,72 @@ function buildTools(t) {
 
   tools.push(t({
     name: 'browser_open',
-    description: '启动/接管浏览器（懒启动，profile 持久保留登录态）。给 url 则新开或导航该页；不给则确保浏览器在跑并返回当前标签页。第一次调用后网页会实时出现在右下角观察窗里，用户可随时接管。',
-    parameters: { url: { type: 'string', description: '可选，要打开的 URL' }, newTab: { type: 'boolean', description: 'true=新开标签页（默认在当前页导航）' } },
+    description: '启动/接管浏览器（懒启动，profile 持久保留登录态）。给 url 则新开或导航该页；不给则确保浏览器在跑并返回当前标签页。'
+      + '默认用**插件自带实例**：独立窗口 + 独立 profile，不碰用户日常浏览器，**不受逐站点授权限制** —— '
+      + '免登录网页（公开页、插件 UI 自查、落地页巡检、竞对情报）一律用它，直接开、无需任何授权，可 newTab 新开页。'
+      + '需要"你自己的登录态"（后台、飞书文档、公司系统）时传 use:"edge" 或 use:"chrome"（你日常那个浏览器，扩展必须已连接）：'
+      + '那一档逐站点授权、默认只读，站点没在扩展弹窗里点过「允许」会直接报"站点未授权"；扩展硬拒 Target.createTarget，所以只导航当前页、不能新开标签页。'
+      + '做回免登录的事时传 use:"plugin" 切回插件实例。返回值里的 browser/hint 会告诉你当前实际用哪个浏览器。'
+      + 'gui:true = 在插件实例里打开 **DSH 自己的 Web GUI**（用宿主 connection 服务签发的带 token 的已认证 URL；'
+      + '插件 Chrome 是干净 profile，直接访问根路径会 401 "dsh web authentication required"，所以必须走这个 URL）。'
+      + '第一次调用后网页会实时出现在右下角观察窗里，用户可随时接管。',
+    parameters: {
+      url: { type: 'string', description: '可选，要打开的 URL' },
+      newTab: { type: 'boolean', description: 'true=新开标签页（默认在当前页导航；用户浏览器那一档被扩展拒绝，只导航当前页）' },
+      gui: { type: 'boolean', description: 'true=打开 DSH 自己的 Web GUI（自动用带 launch token 的已认证 URL；与 url 互斥）' },
+    },
     async execute(args) {
-      if (!alive()) await launch()
+      let url = args.url
+      if (args.gui) {
+        const u = guiAuthUrlNow()
+        if (!u) {
+          return {
+            ok: false,
+            error: '拿不到 DSH GUI 的已认证 URL（宿主 connection 服务未就绪或没暴露 authenticatedUrl）',
+            hint: '替代办法：把 DSH 启动时打印的 `dsh web: http://127.0.0.1:<端口>/?token=…` 原样粘到目标浏览器里打开一次，token 会换成正常 cookie（303 落地），之后那个浏览器就能一直开 GUI 了。',
+          }
+        }
+        url = u
+      }
+      const s = await useSession(args.use)
+      if (!aliveOf(s)) await launch()
       const tab = await selectedTab()
-      if (args.url) {
-        if (args.newTab) { const { targetId } = await browser.cdp.send('Target.createTarget', { url: args.url }); browser.selected = targetId; await refreshTabs(); await attachTab(browser.tabs.find((x) => x.targetId === targetId)) }
-        else { await gotoUrl(tab, args.url) }
+      if (url) {
+        if (args.newTab) { const { targetId } = await browser.cdp.send('Target.createTarget', { url }); browser.selected = targetId; await refreshTabs(); await attachTab(browser.tabs.find((x) => x.targetId === targetId)) }
+        else { await gotoUrl(tab, url) }
       } else if (/^about:blank$/.test(tab.url || '')) {
         await gotoUrl(tab, 'about:blank')
       }
       await refreshTabs()
       const cur = browser.tabs.find((x) => x.targetId === browser.selected)
-      return { ok: true, url: cur?.url, title: cur?.title, tabs: browser.tabs.length }
+      const userKind = isUserKind(s.kind)
+      const ks = connectedKinds()
+      return {
+        ok: true,
+        browser: userKind ? `你的 ${kindLabel(s.kind)}` : '插件自带实例',
+        use: s.kind,
+        connected: ks,
+        url: cur?.url, title: cur?.title, tabs: browser.tabs.length,
+        hint: userKind
+          ? `当前在你的 ${kindLabel(s.kind)} 里：站点未授权会直接报错（点扩展图标 →「允许此站点」或「允许当前所有标签页」）；`
+            + '要点击/打字还得在弹窗里打开「允许操作」。要回到免授权、可新开页面的插件自带实例，再调 browser_open {use:"plugin"}。'
+          : `当前在插件自带实例（免授权、可新开页面）。要用你的登录态就传 use:"${ks.includes(settings.userDefault) ? settings.userDefault : (ks[0] || 'edge')}"`
+            + `（已接入：${ks.length ? ks.map(kindLabel).join('、') : '暂无'}）；做完再 {use:"plugin"} 切回来。`,
+      }
     },
   }))
 
   tools.push(t({
     name: 'browser_close',
-    description: '关闭浏览器（不删用户数据目录，登录态保留）。任务做完后调用。',
+    description: '关掉当前这台调用所用的浏览器：插件自带实例=真的关掉窗口（不删用户数据目录，登录态保留）；'
+      + '用户的 Chrome/Edge=只断开调试器、不关人家的浏览器（再调就恢复读取）。任务做完后调用。',
     parameters: {},
     autostart: false,
     async execute() {
-      if (!alive()) return { ok: true, note: '浏览器本来就没在跑' }
+      const s = browser.session
+      if (!aliveOf(s)) return { ok: true, note: '浏览器本来就没在跑' }
       await shutdown(true)
-      return { ok: true }
+      return { ok: true, browser: isUserKind(s.kind) ? `你的 ${kindLabel(s.kind)}` : '插件自带实例' }
     },
   }))
 
@@ -992,7 +1455,7 @@ function buildTools(t) {
     async execute(args) {
       const act = args.action
       await refreshTabs()
-      const view = () => browser.tabs.map((x, i) => ({ i, url: x.url, title: x.title, selected: x.targetId === browser.selected }))
+      const view = () => browser.tabs.map((x, i) => ({ i, url: x.url, title: x.title, selected: x.targetId === browser.selected, allowed: x.allowed !== false }))
       if (act === 'list') return { tabs: view() }
       if (act === 'new') {
         const { targetId } = await browser.cdp.send('Target.createTarget', { url: args.url || 'about:blank' })
@@ -1065,6 +1528,110 @@ function buildTools(t) {
   return tools
 }
 
+// ------------------------------------------------------------- 用户浏览器桥（多浏览器）
+
+/** 桥的连接发生变化：把每条会话的传输重新兜一遍，并让"刚断开的那个"退场。 */
+function onBridgeStatus(st) {
+  const kinds = st && Array.isArray(st.kinds)
+    ? st.kinds
+    // 兜底也要给 kind：v1 形状的 st.browser 是**完整 UA**（不是 kind），塞进 Set 会让
+    // live.has('chrome') 永远为 false，把所有 user 会话误判离线（子代理 review 抓到的坑）。
+    : (Array.isArray(st?.browsers) ? st.browsers.map((b) => b.kind) : [])
+  const live = new Set(kinds.filter(Boolean))
+  const wasEmpty = ![...browser.sessions.values()].some((s) => isUserKind(s.kind) && s.cdp)
+  for (const s of browser.sessions.values()) {
+    if (!isUserKind(s.kind)) continue
+    if (live.has(s.kind)) {
+      s.cdp = browser.bridge ? browser.bridge.cdpFor(s.kind) : null
+      s.userClosed = false
+      s.tabs = []; s.selected = null
+      s.lastPos = null
+      noteAction(`🔴 已接入你的 ${kindLabel(s.kind)}（逐站点授权；「允许操作」开着才能点击/打字）`)
+    } else {
+      if (s.cdp) noteAction(`已断开 ${kindLabel(s.kind)}（浏览器本身没关）`)
+      s.cdp = null
+      s.tabs = []; s.selected = null; s.userClosed = false
+      // 断开的就是当前活跃会话 → 退回插件实例，避免后续调用对着空气发指令
+      if (browser.session === s) viewOf(sessionOf('plugin'))
+    }
+  }
+  // backendMode='user' 的语义是"默认就用你的浏览器"：桥从"一台都没有"变成"有"时，
+  // 就把活跃会话切过去。只在 0→N 这一次切换，免得你手动 use 指定过的浏览器被反复顶掉。
+  if (wasEmpty && live.size && settings.backendMode === 'user') {
+    const want = live.has(settings.userDefault) ? settings.userDefault : kinds[0]
+    if (want) {
+      try { viewOf(sessionOf(want)) } catch { /* ignore */ }
+      noteAction(`🟢 backendMode=user：已切到你的 ${kindLabel(want)}`)
+    }
+  }
+  if (browser.session) viewOf(browser.session)
+}
+
+/**
+ * 把 BridgeServer 包装成"某个浏览器专属的 CDP 传输"，形状与 Cdp 一致
+ * （send / on / close / alive），于是会话层不需要知道背后是桥还是本地端口。
+ *
+ * sessionId 的 `<kind>:` 前缀由扩展负责加/剥（见 docs/MULTI-BROWSER.md §3）：
+ * host 只是把它原样透传，靠前缀决定投给哪条扩展连接。
+ */
+function bridgeCdpFor(bridge, kind) {
+  if (!bridge) return null
+  return {
+    kind,
+    get alive() {
+      if (!bridge.alive) return false
+      try { return typeof bridge.has === 'function' ? bridge.has(kind) : (bridge.list() || []).some((b) => b.kind === kind) } catch { return false }
+    },
+    send(method, params, sessionId, timeoutMs) { return bridge.send(method, params, sessionId, timeoutMs, kind) },
+    on(event, fn) { return bridge.on(event, (params, sessionId, evKind) => { if (!evKind || evKind === kind) fn({ ...(params || {}), ...(sessionId ? { sessionId } : {}) }) }) },
+    close() { try { if (typeof bridge.drop === 'function') bridge.drop(kind) } catch { /* ignore */ } },
+  }
+}
+
+/** 按 settings.userBridge 起停桥；设置页改开关后调用即可即时生效。 */
+async function syncBridge() {
+  const want = settings.userBridge === true
+  if (want && !browser.bridge) {
+    const wsMod = await loadWsModule()
+    if (!wsMod) { console.warn('[dsh-browser-live] 桥需要 ws 包（未解析到 WebSocketServer），用户浏览器模式不可用'); return }
+    const srv = new BridgeServer({
+      wsMod, baseDir: BASE_DIR(), port: settings.bridgePort, hostVersion: version,
+      onStatus: (st) => { try { onBridgeStatus(st) } catch { /* ignore */ } },
+    })
+    srv.on('bl.detached', (p, sid, kind) => {
+      // 标签页被关 / 调试器被 DevTools 或别的扩展抢走 → 立刻作废该浏览器的本地 sessionId，
+      // 否则下一次工具调用会拿着死 session 去问扩展（表现为"会话已失效"）。
+      const id = String(p?.sessionId || '')
+      if (!id) return
+      for (const s of browser.sessions.values()) {
+        if (kind && s.kind !== kind) continue
+        const t = s.tabs.find((x) => x.sessionId === id)
+        if (t) t.sessionId = null
+      }
+    })
+    try {
+      await srv.start()
+      browser.bridge = srv
+      // 桥要能为每个浏览器 kind 造一条"专属 CDP 传输"（见 bridge.js 的 cdpFor）。
+      // 缺了它就会退化成"所有调用都发往第一条连接"——那正是多浏览器最容易出的错，
+      // 所以这里不静默兜底，直接把问题摆出来。
+      if (typeof srv.cdpFor !== 'function') {
+        srv.cdpFor = (kind) => bridgeCdpFor(srv, kind)
+        console.warn('[dsh-browser-live] 桥未提供 cdpFor，已用 host 侧兜底实现（多浏览器路由可能不准，建议同步更新 bridge.js）')
+      }
+      onBridgeStatus(srv.status())
+      console.log('[dsh-browser-live] 用户浏览器桥已启用 · token 在 ' + BRIDGE_FILE(BASE_DIR()))
+    } catch (e) {
+      console.warn('[dsh-browser-live] 桥启动失败：' + (e?.message || e))
+    }
+  } else if (!want && browser.bridge) {
+    const srv = browser.bridge
+    browser.bridge = null
+    onBridgeStatus({ connected: false, kinds: [] })
+    await srv.stop().catch(() => {})
+  }
+}
+
 // ------------------------------------------------------------- watch panel backend
 
 const viewers = new Set()
@@ -1105,9 +1672,15 @@ function ensureTicker() {
 
 function publicState() {
   const cur = browser.tabs.find((t) => t.targetId === browser.selected)
+  const s = browser.session
   return {
     ok: true,
     alive: alive(),
+    backend: browser.backend,          // plugin=插件自拉实例；user=你的日常浏览器
+    use: s?.kind || 'plugin',          // 当前活跃会话的浏览器 kind（chrome/edge/plugin）
+    browserLabel: s && isUserKind(s.kind) ? kindLabel(s.kind) : '插件自带实例',
+    browsers: browsersView(),          // 每台已接入浏览器一行（给观察窗/设置页显示）
+    bridge: browser.bridge ? browser.bridge.status() : { enabled: false, connected: false, port: settings.bridgePort },
     url: cur?.url || '',
     title: cur?.title || '',
     tabs: browser.tabs.map((tt, i) => ({ i, url: tt.url, title: tt.title, selected: tt.targetId === browser.selected })),
@@ -1115,7 +1688,7 @@ function publicState() {
     lastAction: browser.actionLog.slice(-8),
     panelWanted: browser.panelWanted,
     downloads: browser.downloads.slice(-6),
-    settings: { fps: settings.fps, quality: settings.quality, headless: settings.headless },
+    settings: { fps: settings.fps, quality: settings.quality, headless: settings.headless, userDefault: settings.userDefault },
   }
 }
 
@@ -1139,8 +1712,30 @@ export async function apply(ctx, config) {
     ctx.effect(() => ctx.tools.register(tool), `dsh-browser-live: ${tool.name} tool`)
   }
 
+  // 立好"插件自带实例"这条会话，并把它设为初始活跃会话（此后 browser.* 视图始终跟着活跃会话走）
+  viewOf(sessionOf('plugin'))
+
   const webServer = ctx.get('webServer')
   const offs = []
+
+  // 拿"带 launch token 的 GUI URL"：与 dsh-web-app 打印 dsh web URL 用的是同一个宿主接口。
+  // 宿主可能稍后才就绪（web-app 那边要等 loader settle），所以 inject 回调里能拿到才算数，
+  // 拿不到也不影响任何既有功能（只是 browser_open {gui:true} 会给一条明确提示）。
+  try {
+    ctx.inject(['connection'], (c) => {
+      guiAuthApi = c
+      const u = guiUrlFromCtx(c)
+      if (u) {
+        guiAuthUrl = u
+        console.log('[dsh-browser-live] 已取得 DSH GUI 已认证 URL（可在插件实例里打开 GUI）')
+        noteAction('🔑 已取得 DSH GUI 已认证 URL（browser_open {gui:true} 可直接打开）')
+      } else {
+        console.warn('[dsh-browser-live] connection 服务在，但生成不了 GUI URL（webServer 端口未就绪？）')
+      }
+    })
+  } catch (e) {
+    console.warn('[dsh-browser-live] 无法注入 connection 服务（不影响浏览器功能）:', e?.message)
+  }
 
   // 独立网页版观察窗（liveView=standalone 或面板/地球钮的 ⧉ 按钮打开）：
   // 同一套 /bl/* 接口的全屏页面，可拖到副屏、F11/⛶ 全屏，适合"看着 agent 干活"。
@@ -1154,7 +1749,8 @@ export async function apply(ctx, config) {
     '#hd{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid #222a35;flex:none}',
     '#ttl{font-weight:600;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
     '#url{color:#8b98a9;max-width:38%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px}',
-    '.dot{width:9px;height:9px;border-radius:50%;background:#b9bfc9;flex:none}',
+    '#who{display:none;font-size:11px;padding:1px 7px;border-radius:99px;background:rgba(198,40,40,.18);border:1px solid rgba(198,40,40,.5);color:#ff9b93;flex:none}',
+    '.dot{width:9px;height:9px;border-radius:50%;corner-shape:round;background:#b9bfc9;flex:none}',
     '.dot.on{background:#3fb96f;box-shadow:0 0 7px rgba(63,185,111,.9)}',
     '#tabs{display:none;gap:6px;padding:6px 10px;border-bottom:1px solid #222a35;overflow-x:auto;flex:none}',
     '.tab{flex:none;max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border:1px solid #2b3542;background:#161c24;border-radius:7px;padding:3px 9px;cursor:pointer;color:inherit;font-size:12px}',
@@ -1174,13 +1770,15 @@ export async function apply(ctx, config) {
     '#dl{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap}',
     '#dl a{color:#7aa7e8;text-decoration:none;border:1px solid rgba(91,141,239,.4);border-radius:6px;padding:1px 8px;max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px}',
     '#key{position:absolute;left:-9999px;width:1px;height:1px;opacity:0}',
+    '#fsmsg{display:none;position:fixed;left:50%;bottom:52px;transform:translateX(-50%);max-width:min(680px,92vw);background:rgba(10,14,20,.92);border:1px solid rgba(255,123,114,.45);color:#ffd8d4;border-radius:8px;padding:7px 12px;font-size:12px;line-height:1.5;z-index:9}',
     '</style></head><body>',
-    '<div id="hd"><span class="dot" id="dot"></span><span id="ttl">浏览器观察窗</span><span id="url"></span>',
-    '<button id="rc" title="重连画面">⟳ 重连</button><button id="fs" title="全屏（丢副屏）">⛶ 全屏</button></div>',
+    '<div id="hd"><span class="dot" id="dot"></span><span id="who"></span><span id="ttl">浏览器观察窗</span><span id="url"></span>',
+    '<button id="rc" title="重连画面">⟳ 重连</button><button id="fs" title="全屏（也可以直接按 F11）">⛶ 全屏</button></div>',
     '<div id="tabs"></div>',
     '<div id="stage"><img id="img" alt="" draggable="false">',
     '<div id="empty">等待 agent 打开浏览器…<br>在 DSH 里调用任意 browser_* 工具后，这里会实时显示画面</div>',
     '<div id="act"></div><textarea id="key" spellcheck="false" autocomplete="off"></textarea></div>',
+    '<div id="fsmsg"></div>',
     '<div id="ft"><button id="take">⌨ 接管:开</button>',
     '<label>FPS <select id="fps"><option>1</option><option selected>2</option><option>4</option><option>8</option></select></label>',
     '<label>画质 <select id="q"><option value="40">省流</option><option value="60" selected>默认</option><option value="80">高清</option></select></label>',
@@ -1188,7 +1786,7 @@ export async function apply(ctx, config) {
     '<script>',
     '(function(){',
     'var $=function(i){return document.getElementById(i)};',
-    'var img=$("img"),dot=$("dot"),ttl=$("ttl"),url=$("url"),tabs=$("tabs"),act=$("act"),empty=$("empty"),key=$("key"),dl=$("dl");',
+    'var img=$("img"),dot=$("dot"),ttl=$("ttl"),url=$("url"),tabs=$("tabs"),act=$("act"),empty=$("empty"),key=$("key"),dl=$("dl"),who=$("who");',
     'var vw=1280,takeOn=true,es=null,lastClick=0,stopArmed=false;',
     'function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;"}[c]})}',
     'function trim(u){return String(u||"").replace(/^https?:\\/\\//,"").slice(0,80)}',
@@ -1211,9 +1809,31 @@ export async function apply(ctx, config) {
     '$("q").addEventListener("change",function(){fetch("/bl/settings.json",{method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify({quality:Number(this.value)})})});',
     '$("stop").addEventListener("click",function(){var b=this;if(!stopArmed){stopArmed=true;b.textContent="再点一次确认关闭";setTimeout(function(){stopArmed=false;b.textContent="⏹ 关浏览器"},3000);return}stopArmed=false;b.textContent="⏹ 关浏览器";post("/bl/close-browser",{}).then(function(){setTimeout(poll,300)})});',
     '$("rc").addEventListener("click",function(){open()});',
-    '$("fs").addEventListener("click",function(){if(document.fullscreenElement){document.exitFullscreen()}else if(document.documentElement.requestFullscreen){document.documentElement.requestFullscreen()}});',
+    // 全屏：以前是一个裸 requestFullscreen()，被拒时静默 —— 用户看到的就是"点了没反应"。
+    // 现在把失败原因说出来（被 iframe 的 permission policy 拦 / 浏览器不允许 / 元素失效），
+    // 并给出一定能用的替代（F11）。失败不抛出去，免得把整个页面脚本带崩。
+    'function fsMsg(t){var m=$("fsmsg");if(!m)return;m.textContent=t;m.style.display="block";clearTimeout(fsMsg.t);fsMsg.t=setTimeout(function(){m.style.display="none"},7000)}',
+    '$("fs").addEventListener("click",function(){',
+    '  try{',
+    '    if(document.fullscreenElement||document.webkitFullscreenElement){',
+    '      var ex=document.exitFullscreen||document.webkitExitFullscreen;',
+    '      if(ex){var r=ex.call(document);if(r&&r.catch)r.catch(function(e){fsMsg("退出全屏失败："+e.message)})}',
+    '      return;',
+    '    }',
+    '    var root=document.documentElement;',
+    '    var req=root.requestFullscreen||root.webkitRequestFullscreen||root.mozRequestFullScreen||root.msRequestFullscreen;',
+    '    if(!req){fsMsg("这个浏览器不支持脚本全屏（requestFullscreen 不存在）—— 请直接按 F11") ;return}',
+    '    var p=req.call(root,{navigationUI:"hide"});',
+    '    if(p&&p.catch)p.catch(function(e){',
+    '      var why=(location!==window.top)?"本页被嵌在 iframe 里，父页面没给 allow=fullscreen 权限":"浏览器拒绝了这次请求";',
+    '      fsMsg("全屏被拒："+why+"（"+e.name+": "+e.message+"）。替代：按 F11；或点面板标题栏的 ⧉ 在独立窗口里看")',
+    '    })',
+    '  }catch(e){fsMsg("全屏出错："+e.message+"（替代：按 F11）")}',
+    '});',
     'function open(){if(es){try{es.close()}catch(e){}}try{es=new EventSource("/bl/stream");es.addEventListener("frame",function(ev){var d;try{d=JSON.parse(ev.data)}catch(e){return}vw=d.vw||vw;img.src="data:image/jpeg;base64,"+d.img;empty.style.display="none";dot.classList.add("on");var t=String(d.title||"浏览器观察窗").slice(0,90);ttl.textContent=t;url.textContent=trim(d.url)});es.addEventListener("offline",function(){dot.classList.remove("on")});es.onerror=function(){}}catch(e){}}',
-    'function poll(){api("/bl/state").then(function(st){if(!st)return;dot.classList.toggle("on",!!st.alive);if(!st.alive){empty.style.display="flex";img.removeAttribute("src");ttl.textContent="浏览器观察窗";url.textContent=""}',
+    'function poll(){api("/bl/state").then(function(st){if(!st)return;dot.classList.toggle("on",!!st.alive);',
+    'if(st.backend==="user"){who.style.display="inline-block";who.textContent=((st.bridge&&st.bridge.allowInput)?"🔴 正在操作你的":"🔴 正在读取你的")+(st.browserLabel||"日常浏览器")+((st.bridge&&st.bridge.allowInput)?"（可点击/打字）":"")}else{who.style.display="none";who.textContent=""}',
+    'if(!st.alive){empty.style.display="flex";img.removeAttribute("src");ttl.textContent="浏览器观察窗";url.textContent=""}',
     'var ts=st.tabs||[];tabs.style.display=ts.length>1?"flex":"none";tabs.innerHTML=ts.map(function(t){return \x27<button class="tab\x27+(t.selected?" sel":"")+\x27" data-i="\x27+t.i+\x27">\x27+esc(t.title||trim(t.url)||"(空白页)")+\x27</button>\x27}).join("");',
     'var done=(st.downloads||[]).filter(function(d){return d.state==="done"}).slice(-3);dl.innerHTML=done.map(function(d){return \x27<a href="/bl/download?file=\x27+encodeURIComponent(d.file)+\x27" title="取回下载文件">⬇ \x27+esc(d.file)+\x27</a>\x27}).join("");',
     'var la=st.lastAction||[];var last=la[la.length-1];if(last){act.textContent="🤖 "+last.label;act.classList.add("show")}',
@@ -1225,6 +1845,29 @@ export async function apply(ctx, config) {
   ].join('\n')
 
   if (webServer && typeof webServer.register === 'function') {
+    offs.push(ctx.effect(() => webServer.register({
+      kind: 'exact', path: '/bl/bridge',
+      handler: (req, res) => {
+        req.resume?.()
+        const st = browser.bridge ? browser.bridge.status() : { enabled: false, connected: false, port: settings.bridgePort }
+        sendJson(res, 200, {
+          ok: true,
+          ...st,
+          // token 给的是"用户自己的 DSH 页面"（同源、无 CORS），方便一键复制到扩展里；
+          // 网页/第三方 origin 读不到它（无 CORS 头），扩展的 WS 也只认 chrome-extension:// 的 Origin。
+          token: browser.bridge ? browser.bridge.token : '',
+          bridgeFile: BRIDGE_FILE(BASE_DIR()),
+          extensionDir: path.join(path.dirname(fileURLToPath(import.meta.url)), 'extension'),
+          browsers: browsersView(),
+          userDefault: settings.userDefault,
+          hint: settings.userBridge
+            ? (st.connected
+              ? `扩展已接入：${(st.browsers || []).map((b) => kindLabel(b.kind)).join('、')}`
+              : '扩展未连接：在 Chrome 用 chrome://extensions、在 Edge 用 edge://extensions → 开发者模式 → 加载已解压的扩展程序 → 选 extension 目录，再把 token 粘进弹窗')
+            : '桥未启用：settings.json 里把 userBridge 设为 true（或 PUT /bl/settings.json）',
+        })
+      },
+    }), 'bl: bridge route'))
     offs.push(ctx.effect(() => webServer.register({
       kind: 'exact', path: '/bl/ping',
       handler: (req, res) => { sendJson(res, 200, { ok: true, alive: alive() }); req.resume?.() },
@@ -1245,6 +1888,26 @@ export async function apply(ctx, config) {
         req.on('close', bye)
       },
     }), 'bl: stream route'))
+    offs.push(ctx.effect(() => webServer.register({
+      // 取 / 用「DSH GUI 的已认证 URL」。
+      // 安全取向：URL 里含 launch token，所以只认 POST + JSON（裸 GET 会被 <img>/<script> 这类
+      // 跨站请求捎带上；POST+JSON 触发预检，而本服务不返回 CORS 头，跨站读不到结果）。
+      // 不做 Origin 白名单：同源的观察窗页面本就不带 Origin，拦它反而把自己的 UI 弄坏。
+      kind: 'exact', path: '/bl/gui',
+      handler: async (req, res) => {
+        if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'method not allowed（POST + JSON 才给 URL，避免被跨站捎带）' })
+        let body = {}
+        try { body = await readBody(req) } catch { body = {} }
+        if (body.need !== 'gui-url') return sendJson(res, 400, { ok: false, error: 'need 必须是 "gui-url"' })
+        let url = guiAuthUrlNow()
+        if (typeof body.base === 'string' && body.base) {
+          // 想换成 LAN 地址（局域网访问）时：同一套 token/authority 绑定规则，由宿主服务重签
+          try { url = guiAuthApi ? guiAuthApi.connection.authenticatedUrl(body.base) : url } catch { /* 用默认 */ }
+        }
+        if (!url) return sendJson(res, 503, { ok: false, error: '宿主 connection 服务未就绪（拿不到已认证 URL）', hint: '改用 DSH 启动时打印的 dsh web URL' })
+        sendJson(res, 200, { ok: true, url })
+      },
+    }), 'bl: gui url route'))
     offs.push(ctx.effect(() => webServer.register({
       kind: 'exact', path: '/bl/input',
       handler: async (req, res) => {
@@ -1287,7 +1950,18 @@ export async function apply(ctx, config) {
       handler: async (req, res) => {
         if (req.method === 'GET') return sendJson(res, 200, settings)
         if (req.method === 'PUT' || req.method === 'POST') {
-          try { settings = sanitizeSettings({ ...settings, ...(await readBody(req)) }); saveSettings(); sendJson(res, 200, { ok: true, settings }) }
+          try {
+            const before = `${settings.backendMode}|${settings.userDefault}`
+            settings = sanitizeSettings({ ...settings, ...(await readBody(req)) })
+            saveSettings()
+            await syncBridge()   // userBridge 开关即时生效，不用重启 DSH
+            // backendMode / userDefault 当场生效，别等下一次工具调用（切不了就只是这步失败，配置照样存）
+            let backendWarn
+            if (`${settings.backendMode}|${settings.userDefault}` !== before) {
+              try { await useSession(settings.backendMode === 'user' ? 'user' : (settings.backendMode === 'plugin' ? 'plugin' : '')) } catch (e) { backendWarn = String(e?.message || e) }
+            }
+            sendJson(res, 200, { ok: true, settings, backend: browser.backend, active: browser.session?.kind || '', browsers: browsersView(), ...(backendWarn ? { backendWarn } : {}) })
+          }
           catch (e) { sendJson(res, 400, { ok: false, error: String(e?.message || e) }) }
           return
         }
@@ -1355,6 +2029,8 @@ export async function apply(ctx, config) {
   }
 
   process.on('exit', () => { try { if (browser.proc) browser.proc.kill() } catch {} try { browser.cdp?.close() } catch {} })
+
+  await syncBridge()
 
   console.log('[dsh-browser-live] host up (v' + version + ') · ' + builtTools.length + ' 个 browser_* 工具已注册 · 数据目录 ' + BASE_DIR())
 }
