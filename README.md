@@ -242,7 +242,9 @@ host(index.js) ──WS──> 扩展（extension/, MV3，Chrome 和 Edge 各装
 
 1. 在**那台浏览器**的扩展弹窗里给该站点点「允许」（整批页面可点「允许当前所有标签页」；
    要真点击/打字再打开「允许操作」）；
-2. `browser_open { url, use: "edge" }` → agent 在 Edge 当前标签页里导航/操作（用户浏览器档**不能新开标签页**）；
+2. `browser_open { url, use: "edge" }` → agent 在 Edge 当前标签页里导航/操作。**v0.3.2 扩展起它也能
+   `newTab` 新开页**（开到你指定的 http/https，弹窗「允许 agent 新开标签页」控制，默认开）；
+   新开的页记在 agent 名下，所以可被它自己关，你原有的标签页一个字都不动；
 3. 完事 `browser_open { use: "plugin" }` 切回独立窗口，后面的免登录活继续不受授权限制。
 
 `use` 取值：`plugin`（自带实例）/ `chrome` / `edge`（你的浏览器，必须已接入）/ `user`（settings.userDefault 那台）/
@@ -290,7 +292,7 @@ host(index.js) ──WS──> 扩展（extension/, MV3，Chrome 和 Edge 各装
 
 | 被拒 | 原因 |
 | --- | --- |
-| `browser_tabs new/close` | 不新建/关闭你的标签页（`Target.createTarget/closeTarget`） |
+| `browser_tabs new/close` | `new` 需扩展 v0.3.2+ 且弹窗「允许 agent 新开标签页」开着（自带实例档无条件允许）；`close` 只关 agent 自己开的页（`Target.closeTarget`，你手动开的一律拒绝） |
 | `browser_downloads` | 列的仍是插件实例的 `downloads/` 目录，看不到你 Chrome 自己的下载（接 `chrome.downloads` 属 P2） |
 | 未授权站点 | 逐 origin 授权；没授权时连调试器都附加不上，开了「允许操作」也进不去 |
 | 改网络 / 模拟器 / 改属性 | `Network.setExtraHTTPHeaders`、`Emulation.*`、`DOM.setAttributeValue` 不在接管范围 |
@@ -421,7 +423,8 @@ host(index.js) ──WS──> 扩展（extension/, MV3，Chrome 和 Edge 各装
   - 设置页三档，标签直接写明用途：**免登录用自带实例（推荐，=auto）/ 只用自带实例（=plugin）/ 只用我的浏览器（=user）**；
     下面那行说明按档位分别讲清"免登录页去哪、要登录的页怎么办"。
   - `browser_open` 的返回值新增 `mode`（当前档位）与 `hint`（下一步该 `use:"plugin"` 还是 `use:"user"`），
-    描述里也写明：`auto`/`plugin` 免授权、可 `newTab`；`user` 档逐站点授权、只读、**不能新开标签页**。
+    描述里也写明：`auto`/`plugin` 免授权、可 `newTab`；`user` 档逐站点授权、默认只读，
+    新开标签页自扩展 v0.3.2 起也支持（弹窗可控，仅 http/https）。
   - `PUT /bl/settings.json` 改 `backendMode` **当场换后端**（原来要等下一次工具调用才切）；
     桥/扩展还没连上时切 `user` 只存设置并回 `backendWarn`，等扩展接入后由 `onBridgeStatus` 自愈。
   - `tools/verify-host.mjs` 跟着修：**原来的用例假设"桥一连上就切 user"（v0.6.0 旧行为），在 `auto` 档下必然红**；

@@ -43,19 +43,19 @@ const INPUT_METHODS = new Set([
 const isInputMethod = (m) => INPUT_METHODS.has(m) || m.startsWith('Input.')
 
 // 永远拒绝：改浏览器/标签页结构、网络与模拟器
-// 注意 Target.closeTarget **不在这里** —— 它走 handleCommand 里单独的分支：
-// 只允许关 agent 自己开的标签页（见 state.ownedTabs），你手动开的页面一律拒绝。
+// 注意两件**不在这里**的事：
+//   · Target.closeTarget —— 走 handleCommand 单独分支，只放行 agent 自己开的页；
+//   · Target.createTarget —— 自本期起也放行（走 handleCommand 单独分支）：
+//     只允许开到 http/https/about，受弹窗开关「允许 agent 新开标签页」控制（默认开）。
 const DENIED_PREFIX = ['Emulation.', 'Network.setExtraHTTPHeaders', 'Page.setDownloadBehavior',
-  'Browser.setDownloadBehavior', 'DOM.setAttributeValue', 'Target.createTarget',
+  'Browser.setDownloadBehavior', 'DOM.setAttributeValue',
   'Target.activateTarget', 'Page.close', 'Page.bringToFront', 'Runtime.addBinding']
 
-const DENIED_HINT = {
-  'Target.createTarget': '暂不允许新建标签页；请自己在浏览器里开好页面（或让 agent 导航当前页）',
-}
+const DENIED_HINT = {}
 
 // ---- 状态 ------------------------------------------------------------------
 const state = {
-  cfg: { port: 9760, token: '', autoConnect: true, allowAll: false, allowInput: false, allowCloseOwn: true, origins: [] },
+  cfg: { port: 9760, token: '', autoConnect: true, allowAll: false, allowInput: false, allowCloseOwn: true, allowNewTab: true, origins: [] },
   // agent **自己**开出来的标签页（新开标签页去已授权站点时记下）。关标签页只放行这些，
   // 你手动开的页面永远不会被关 —— 这是"允许关自己开的页"与"不碰你的页"的分界线。
   ownedTabs: new Set(),
@@ -86,13 +86,14 @@ function note(msg) {
 // ---- 配置持久化 -------------------------------------------------------------
 async function loadCfg() {
   try {
-    const raw = await chrome.storage.local.get(['port', 'token', 'autoConnect', 'allowAll', 'allowInput', 'allowCloseOwn', 'origins'])
+    const raw = await chrome.storage.local.get(['port', 'token', 'autoConnect', 'allowAll', 'allowInput', 'allowCloseOwn', 'allowNewTab', 'origins'])
     state.cfg.port = Number.isFinite(raw.port) ? raw.port : 9760
     state.cfg.token = typeof raw.token === 'string' ? raw.token : ''
     state.cfg.autoConnect = raw.autoConnect !== false
     state.cfg.allowAll = raw.allowAll === true
     state.cfg.allowInput = raw.allowInput === true
     state.cfg.allowCloseOwn = raw.allowCloseOwn !== false
+    state.cfg.allowNewTab = raw.allowNewTab !== false   // 默认开：用户明确要求"能新开页"
     state.cfg.origins = Array.isArray(raw.origins) ? raw.origins.filter((x) => typeof x === 'string') : []
   } catch { /* 首用默认 */ }
   return state.cfg
@@ -103,11 +104,12 @@ async function saveCfg(patch) {
     await chrome.storage.local.set({
       port: state.cfg.port, token: state.cfg.token, autoConnect: state.cfg.autoConnect,
       allowAll: state.cfg.allowAll, allowInput: state.cfg.allowInput, allowCloseOwn: state.cfg.allowCloseOwn,
+      allowNewTab: state.cfg.allowNewTab,
       origins: state.cfg.origins,
     })
   } catch { /* ignore */ }
   // 授权/开关一变就同步给 host：/bl/state 里直接能看到，省得用户复述
-  sendToHost({ type: 'config', origins: state.cfg.origins, allowAll: state.cfg.allowAll, allowInput: state.cfg.allowInput, allowCloseOwn: state.cfg.allowCloseOwn })
+  sendToHost({ type: 'config', origins: state.cfg.origins, allowAll: state.cfg.allowAll, allowInput: state.cfg.allowInput, allowCloseOwn: state.cfg.allowCloseOwn, allowNewTab: state.cfg.allowNewTab })
   return state.cfg
 }
 
@@ -269,6 +271,22 @@ export async function handleCommand({ method, params = {}, sessionId }) {
     note(`已关闭 agent 自己打开的标签页 #${id}`)
     return { success: true }
   }
+  // 新开标签页：用户明确要求"agent 要能新开页"，于是从硬拒名单里放出来了。
+  // 边界：① 只允许 http/https/about（不许 file://、chrome://）② 弹窗开关可随时关掉
+  // ③ 开出来的页记进 ownedTabs —— 只有 agent 自己开的页才允许被它关（见上一段）。
+  // 隐私底线不变：新开 ≠ 能看。未授权站点的 url/title 照旧打码，调试器照旧拒附加，
+  // 所以新开一个未授权站点对 agent 毫无用处；要读页面仍然必须用户逐站点授权。
+  if (method === 'Target.createTarget') {
+    if (state.cfg.allowNewTab !== true) {
+      throw new Error('已拒绝：新开标签页需要你在扩展弹窗里打开「允许 agent 新开标签页」')
+    }
+    const url = String(params.url || 'about:blank')
+    if (!/^(https?:|about:)/i.test(url)) throw new Error('只允许新开到 http/https/about 页面')
+    const tab = await chrome.tabs.create({ url, active: true })
+    state.ownedTabs.add(tab.id)
+    note(`agent 新开标签页 #${tab.id} → ${url.slice(0, 80)}`)
+    return { targetId: String(tab.id) }
+  }
   const allowedNow = ALLOWED.has(method) || (isInputMethod(method) && state.cfg.allowInput === true)
   if (!allowedNow) throw new Error(deniedReason(method))
 
@@ -330,6 +348,7 @@ export function status() {
     allowAll: state.cfg.allowAll,
     allowInput: state.cfg.allowInput,
     allowCloseOwn: state.cfg.allowCloseOwn,
+    allowNewTab: state.cfg.allowNewTab,
     ownedTabs: [...state.ownedTabs],     // agent 自己开的标签页（只有这些页允许被关）
     origins: [...state.cfg.origins],
     autoConnect: state.cfg.autoConnect,
@@ -355,7 +374,7 @@ export async function connect() {
   const isCurrent = () => state.ws === ws
   ws.onopen = () => {
     if (!isCurrent()) return
-    sendToHost({ type: 'hello', protocol: PROTOCOL, token: state.cfg.token, version: chrome.runtime.getManifest().version, browser: KIND, origins: state.cfg.origins, allowAll: state.cfg.allowAll, allowInput: state.cfg.allowInput, allowCloseOwn: state.cfg.allowCloseOwn })
+    sendToHost({ type: 'hello', protocol: PROTOCOL, token: state.cfg.token, version: chrome.runtime.getManifest().version, browser: KIND, origins: state.cfg.origins, allowAll: state.cfg.allowAll, allowInput: state.cfg.allowInput, allowCloseOwn: state.cfg.allowCloseOwn, allowNewTab: state.cfg.allowNewTab })
     startPing()
   }
   ws.onmessage = (ev) => {
@@ -507,6 +526,12 @@ const POPUP_API = {
   async setCloseOwn(flag) {
     await saveCfg({ allowCloseOwn: !!flag })
     note(flag ? '已允许 agent 关闭它自己打开的标签页' : '已关闭：agent 连自己打开的标签页也不能关')
+    return status()
+  },
+  /** 允许 agent 新开标签页（http/https/about；新开的页算它自己开的，可被它关）。 */
+  async setNewTab(flag) {
+    await saveCfg({ allowNewTab: !!flag })
+    note(flag ? '已允许 agent 新开标签页' : '已关闭：agent 不能再新开标签页')
     return status()
   },
 }

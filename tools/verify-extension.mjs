@@ -47,7 +47,7 @@ const TABS = [
 ]
 const storage = {}
 let windowFocused = true
-const calls = { attach: [], detach: [], sendCommand: [], badge: [], tabsUpdate: [], windowsUpdate: [] }
+const calls = { attach: [], detach: [], sendCommand: [], badge: [], tabsUpdate: [], windowsUpdate: [], tabsCreate: [], tabsRemove: [] }
 const listeners = { debuggerEvent: [], debuggerDetach: [], tabRemoved: [], alarm: [], message: [] }
 
 // 这套件扮演 Chrome：扩展在装载时按 UA 嗅探身份（Edg/ → edge），Node 里没有 navigator，
@@ -73,11 +73,25 @@ globalThis.chrome = {
   tabs: {
     query: async () => TABS.map((t) => ({ ...t })),
     get: async (id) => { const t = TABS.find((x) => x.id === id); if (!t) throw new Error('no tab'); return { ...t } },
+    create: async (props) => {
+      const id = TABS.reduce((m, t) => Math.max(m, t.id), 20) + 1
+      const t = { id, url: (props && props.url) || 'about:blank', title: '', active: !!(props && props.active), windowId: 1 }
+      TABS.push(t)
+      calls.tabsCreate.push({ id, url: t.url })
+      return { ...t }
+    },
     update: async (id, props) => {
       calls.tabsUpdate.push({ id, props })
       const t = TABS.find((x) => x.id === id)
       if (t && props && props.active) { TABS.forEach((x) => { x.active = false }); t.active = true }
       return t ? { ...t } : undefined
+    },
+    remove: async (id) => {
+      const i = TABS.findIndex((x) => x.id === id)
+      if (i < 0) throw new Error('no tab to remove')
+      TABS.splice(i, 1)
+      calls.tabsRemove.push(id)
+      for (const f of listeners.tabRemoved) f(id, { isWindowClosing: false })
     },
     onRemoved: { addListener: (f) => listeners.tabRemoved.push(f) },
   },
@@ -204,7 +218,24 @@ await denied('Input.dispatchMouseEvent', { type: 'mousePressed', x: 1, y: 1 }, '
 await denied('Input.dispatchKeyEvent', { type: 'keyDown' }, 'Input.dispatchKeyEvent 被拒', /允许操作/)
 await denied('Input.insertText', { text: 'hi' }, 'Input.insertText 被拒', /允许操作/)
 await denied('DOM.setFileInputFiles', { files: ['C:\\x'] }, 'DOM.setFileInputFiles 被拒', /允许操作/)
-await denied('Target.createTarget', { url: 'https://x.test' }, 'Target.createTarget 仍被拒', /不允许新建/)
+// v0.9.1：Target.createTarget 从"永远拒"改成"弹窗开关控制的放行"（只限 http/https/about）。
+// 先验开关关掉时必须拒（免得"放行"变成不可关闭的能力），再验开着时真的建页并返回 CDP 形状。
+ok(ext.__internals.state.cfg.allowNewTab === true, '「允许 agent 新开标签页」默认开')
+await ext.__internals.POPUP_API.setNewTab(false)
+await denied('Target.createTarget', { url: 'https://x.test' }, '开关关掉后 Target.createTarget 被拒', /弹窗里打开/)
+await ext.__internals.POPUP_API.setNewTab(true)
+await denied('Target.createTarget', { url: 'file:///C:/secret.txt' }, 'createTarget 不许 file:', /http/)
+await denied('Target.createTarget', { url: 'chrome://settings' }, 'createTarget 不许 chrome:', /http/)
+{
+  const nt = await srv.send('Target.createTarget', { url: 'https://x.test/page' }, sid)
+  ok(nt && typeof nt.targetId === 'string', 'createTarget 放行并返回 { targetId }（CDP 形状）', JSON.stringify(nt))
+  const made = calls.tabsCreate[calls.tabsCreate.length - 1]
+  ok(made && made.url === 'https://x.test/page', '真的走 chrome.tabs.create 且 URL 原样', JSON.stringify(made))
+  ok(ext.__internals.state.ownedTabs.has(Number(nt.targetId)), '新开的页记进 ownedTabs（所以它可被 agent 自己关）')
+  // 新开的页可以立刻被关（它是 agent 自己开的）；别的手动页仍然不行
+  const cl = await srv.send('Target.closeTarget', { targetId: nt.targetId }, sid)
+  ok(cl && cl.success === true, 'agent 自己新开的页可以被它自己关')
+}
 await denied('Target.closeTarget', { targetId: '12' }, 'Target.closeTarget：不是 agent 开的页 → 拒绝', /只能关闭 agent 自己打开的标签页/)
 // 关标签页是**有条件的白名单**：只放行 agent 自己开的页（见 verify-extension-v2 的 D 段测放行）。
 // 弹窗开关关掉之后，连自己开的也不许关 —— P0 只读优先。

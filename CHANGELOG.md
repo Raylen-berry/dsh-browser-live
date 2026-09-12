@@ -1,5 +1,24 @@
 # 变更记录
 
+## 0.9.1 — 用户浏览器档放开 `Target.createTarget`：agent 可以新开标签页了（弹窗可控）
+
+起因（用户 2026-09-12）："扩展不允许新开标签页，这个还是很有必要"。之前那句"可随意 newTab"
+指的是**插件自带实例**那一档；用户日常浏览器那一档一直是硬拒的。
+
+- 扩展 v0.3.2：`Target.createTarget` 从 `DENIED_PREFIX` 移出，改走 `handleCommand` 单独分支：
+  只允许开到 `http/https/about`（不许 `file://`/`chrome://`），走 `chrome.tabs.create`，
+  返回 CDP 形状的 `{ targetId }`，并把新页记进 `state.ownedTabs` —— 于是"agent 自己开的页可被它关"
+  这条既有边界自然延续到新开的页上。
+- 新开关 `allowNewTab`（弹窗「允许 agent 新开标签页」，**默认开**）：关掉后 createTarget 立刻回到
+  拒绝并提示去哪里打开。`status()` / `hello` / `config` 三条上报都带上它，`/bl/state` 与 DSH 里都能看到。
+- **隐私底线没变**：新开 ≠ 能看。未授权站点的 url/title 照旧打码、调试器照旧拒附加，
+  所以 agent 新开一个未授权站点对它毫无用处；要读页面仍必须用户逐站点「允许」。
+- 插件自带实例那一档不受影响（它本来就能 `newTab`）。顺带确认：该档在 Chrome 被卸载后
+  **会自动改用 msedge.exe**（探测顺序 chromePath → 环境变量 → Chrome → Edge → Brave），
+  即"免授权 + 可新开页"这个能力不依赖装了 Chrome。
+- 文档同步：`extension/README.md` 授权表、`README.md` 隐私表与工具描述里的"用户浏览器档不能新开标签页"
+  全部改掉，避免下一台机器上的 agent 继续按旧描述行事。
+
 ## 0.9.0 — 留痕：agent 用浏览器做过的每一步都落盘（append-only + 哈希链）
 
 起因（用户 2026-09-12 的原话）：同意我关掉我自己打开的网页之后，他意识到

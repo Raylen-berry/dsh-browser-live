@@ -52,7 +52,8 @@
 | 标签页 | 只有被你允许的站点才会被 `chrome.debugger.attach`；被接管的标签页在工具栏显示红点角标 |
 | 操作 | 「允许操作」默认**关**。关着时 `Input.*` / `DOM.setFileInputFiles` 一律拒绝，并提示去哪里打开 |
 | 只读方法 | `Target.getTargets/attachToTarget/detachFromTarget`、`Page.enable/getLayoutMetrics/captureScreenshot/getNavigationHistory/navigate/reload/navigateToHistoryEntry`、`Runtime.enable/evaluate`、`DOM.enable/getDocument/querySelector`、`Browser.getVersion` |
-| 永远拒绝 | `Target.createTarget/closeTarget/activateTarget`、`Page.close/bringToFront`、`Network.*`、`Emulation.*`、`DOM.setAttributeValue` |
+| 新开标签页 | 弹窗开关「允许 agent 新开标签页」，**默认开**（v0.3.2 起）。只允许开到 `http/https/about`；新开的页记进 `ownedTabs`，即"agent 自己开的页"，只有这些页允许被它关。**新开 ≠ 能看**：未授权站点照旧打码、照旧拒附加调试器 |
+| 永远拒绝 | `Target.activateTarget`、`Page.close/bringToFront`、`Network.*`、`Emulation.*`、`DOM.setAttributeValue`（`Target.createTarget` 见上一行，`Target.closeTarget` 只放行 agent 自己开的页） |
 | 高危开关 | 「允许所有网站」= 放弃逐站点确认，等于把该浏览器全部登录态交给 agent，默认关 |
 
 **已知缺口（诚实说）**：`Runtime.evaluate` 在白名单里，因为 snapshot/text 都靠它取正文 ——

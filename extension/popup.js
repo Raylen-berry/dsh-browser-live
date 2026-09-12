@@ -66,6 +66,7 @@ async function refresh() {
     $('allowAll').checked = !!st.allowAll
     $('allowInput').checked = !!st.allowInput
     $('allowCloseOwn').checked = st.allowCloseOwn !== false
+    $('allowNewTab').checked = st.allowNewTab !== false
 
     const origins = st.origins || []
     $('granted').textContent = (st.allowAll
@@ -118,6 +119,14 @@ $('allowCloseOwn').addEventListener('change', async () => {
   const r = await api('setCloseOwn', on)
   setFlash(r.ok
     ? (on ? '已允许 agent 关闭它自己打开的标签页（你手动开的页面仍然不会被关）' : '已关闭：agent 连自己打开的标签页也不能关')
+    : ('失败：' + (r.error || '')), !r.ok)
+  refresh()
+})
+$('allowNewTab').addEventListener('change', async () => {
+  const on = $('allowNewTab').checked
+  const r = await api('setNewTab', on)
+  setFlash(r.ok
+    ? (on ? '已允许 agent 新开标签页（仅 http/https；要读页面仍需逐站点授权）' : '已关闭：agent 只能在你已有的标签页里工作')
     : ('失败：' + (r.error || '')), !r.ok)
   refresh()
 })

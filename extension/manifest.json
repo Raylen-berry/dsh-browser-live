@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "DSH Browser Bridge",
-  "version": "0.3.1",
-  "description": "把 DSH 的 browser_* 工具接到你日常浏览器的标签页（Chrome / Edge / Brave / Opera 各装一份，互不干扰）：默认只读，打开「允许操作」后可真点击/打字/上传；关标签页只放行 agent 自己开的那几张（弹窗里可整个关掉）",
+  "version": "0.3.2",
+  "description": "把 DSH 的 browser_* 工具接到你日常浏览器的标签页（Chrome / Edge / Brave / Opera 各装一份，互不干扰）：默认只读，打开「允许操作」后可真点击/打字/上传；agent 可新开标签页（弹窗可关），关标签页只放行 agent 自己开的那几张",
   "minimum_chrome_version": "116",
   "background": {
     "service_worker": "background.js",

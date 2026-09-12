@@ -1374,14 +1374,15 @@ function buildTools(t) {
       + '默认用**插件自带实例**：独立窗口 + 独立 profile，不碰用户日常浏览器，**不受逐站点授权限制** —— '
       + '免登录网页（公开页、插件 UI 自查、落地页巡检、竞对情报）一律用它，直接开、无需任何授权，可 newTab 新开页。'
       + '需要"你自己的登录态"（后台、飞书文档、公司系统）时传 use:"edge" 或 use:"chrome"（你日常那个浏览器，扩展必须已连接）：'
-      + '那一档逐站点授权、默认只读，站点没在扩展弹窗里点过「允许」会直接报"站点未授权"；扩展硬拒 Target.createTarget，所以只导航当前页、不能新开标签页。'
+      + '那一档逐站点授权、默认只读，站点没在扩展弹窗里点过「允许」会直接报"站点未授权"；'
+      + '扩展 v0.3.2 起 agent 也能新开标签页（只限 http/https，弹窗里可关），新开的页记在它自己名下、可被它关。'
       + '做回免登录的事时传 use:"plugin" 切回插件实例。返回值里的 browser/hint 会告诉你当前实际用哪个浏览器。'
       + 'gui:true = 在插件实例里打开 **DSH 自己的 Web GUI**（用宿主 connection 服务签发的带 token 的已认证 URL；'
       + '插件 Chrome 是干净 profile，直接访问根路径会 401 "dsh web authentication required"，所以必须走这个 URL）。'
       + '第一次调用后网页会实时出现在右下角观察窗里，用户可随时接管。',
     parameters: {
       url: { type: 'string', description: '可选，要打开的 URL' },
-      newTab: { type: 'boolean', description: 'true=新开标签页（默认在当前页导航；用户浏览器那一档被扩展拒绝，只导航当前页）' },
+      newTab: { type: 'boolean', description: 'true=新开标签页（扩展 v0.3.2+ 且弹窗里「允许 agent 新开标签页」开着时才允许；插件自带实例那一档无条件允许）' },
       gui: { type: 'boolean', description: 'true=打开 DSH 自己的 Web GUI（自动用带 launch token 的已认证 URL；与 url 互斥）' },
     },
     async execute(args) {
