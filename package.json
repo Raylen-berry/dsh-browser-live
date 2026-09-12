@@ -1,7 +1,7 @@
 {
   "name": "dsh-browser-live",
-  "version": "0.8.5",
-  "description": "看得见的 Agent 浏览器（自研，零外部依赖）：18 个 browser_* 工具直接驱动本机 Chrome/Edge（CDP，含拟人鼠标轨迹），实时观察窗支持内嵌面板与独立网页（/bl/view，可丢副屏/全屏）两种形态、鼠标键盘接管，可配代理与额外启动参数；v0.5.0 起可选接管你自己的日常浏览器（MV3 扩展 + 本地 WS 桥，逐站点授权；v0.6.0 打开「允许操作」后可真点击/打字/上传）；v0.7.0 起 Chrome 与 Edge 可同时接入，每次调用用 use 指定用哪台；v0.8.2 起首选浏览器起不来会自动降级到下一个候选，v0.8.3 起失败还会补试兼容参数 --in-process-gpu 并记住；接管你的浏览器时「当前页未授权、目标站已授权」会新开一个标签页、不动你正在看的页面（v0.8.5 起换页判断不再被已附着缓存绕过）；v0.8.5 起只允许关闭 agent 自己打开的标签页（弹窗里可整个关掉），你手动开的页面任何情况下都不动；浮球与观察窗会给设置页/弹层让位，不压内容；登录态持久化在 $DSH_HOME/dsh-browser-live。设计灵感来自 dsh-ego-browser (MIT)。",
+  "version": "0.9.0",
+  "description": "看得见的 Agent 浏览器（自研，零外部依赖）：18 个 browser_* 工具直接驱动本机 Chrome/Edge（CDP，含拟人鼠标轨迹），实时观察窗支持内嵌面板与独立网页（/bl/view，可丢副屏/全屏）两种形态、鼠标键盘接管，可配代理与额外启动参数。**换台机器请注意：接管"你的日常浏览器"必须人工装浏览器扩展（本仓库 extension/）+ 粘 token + 逐站点授权，agent 只能把现场备好（browser_ext_setup）、点不了那几下；而"插件自带实例"这一档免授权、全自动。详见 README「换台机器：可迁移性与必须手动的步骤」**。v0.5.0 起可选接管你自己的日常浏览器（MV3 扩展 + 本地 WS 桥，逐站点授权；v0.6.0 打开「允许操作」后可真点击/打字/上传）；v0.7.0 起 Chrome 与 Edge 可同时接入，每次调用用 use 指定用哪台；v0.8.2 起首选浏览器起不来会自动降级到下一个候选，v0.8.3 起失败还会补试兼容参数 --in-process-gpu 并记住；接管你的浏览器时「当前页未授权、目标站已授权」会新开一个标签页、不动你正在看的页面（v0.8.5 起换页判断不再被已附着缓存绕过）；v0.8.5 起只允许关闭 agent 自己打开的标签页（弹窗里可整个关掉），你手动开的页面任何情况下都不动；v0.9.0 起把 agent 用浏览器做过的每一步都留痕（audit/ 下一天一个 append-only JSONL + 哈希链：工具名/参数/成败/耗时/调用前后 URL，浏览器关闭后仍可查，node tools/verify-audit-chain.mjs 验链）；浮球与观察窗会给设置页/弹层让位，不压内容；登录态持久化在 $DSH_HOME/dsh-browser-live。设计灵感来自 dsh-ego-browser (MIT)。",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -20,6 +20,7 @@
   },
   "files": [
     "index.js",
+    "audit.js",
     "bridge.js",
     "client.js",
     "extension",
@@ -31,7 +32,7 @@
     "NOTICE"
   ],
   "scripts": {
-    "test": "node --check index.js && node --check bridge.js && node --check client.js && node --check extension/background.js && node --check extension/sid.js && node --check extension/popup.js && node tools/verify-manifest.mjs && node tools/verify-bridge.mjs && node tools/verify-bridge-v2.mjs && node tools/verify-extension.mjs && node tools/verify-extension-v2.mjs && node tools/verify-launch.mjs && node tools/verify-launcher.mjs && node tools/verify-host.mjs && node tools/verify-browsers.mjs"
+    "test": "node --check index.js && node --check audit.js && node --check bridge.js && node --check client.js && node --check extension/background.js && node --check extension/sid.js && node --check extension/popup.js && node tools/verify-audit.mjs && node tools/verify-audit-chain.mjs && node tools/verify-manifest.mjs && node tools/verify-bridge.mjs && node tools/verify-bridge-v2.mjs && node tools/verify-extension.mjs && node tools/verify-extension-v2.mjs && node tools/verify-launch.mjs && node tools/verify-launcher.mjs && node tools/verify-host.mjs && node tools/verify-browsers.mjs"
   },
   "dsh": {
     "bundle": {

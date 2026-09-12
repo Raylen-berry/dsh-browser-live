@@ -33,6 +33,55 @@ dsh plugin --profile web add link:D:\DeepSeek\dsh-plugins\dsh-browser-live
 
 装完**重启一次 DSH Desktop**。设置 → 插件 里可开关；侧栏底部出现 🌐 观察窗按钮。
 
+## 换台机器：可迁移性与**必须手动的步骤**
+
+> 给后续在任何一台机器上接手的人或 agent —— **本插件有一部分能力拿不到就是拿不到，必须人手动做**，
+> 别在换了机器之后以为"克隆+重启就完事"。起因：用户 2026-09-12 反馈
+> "工作电脑上传，回家发现可用性很差，一定需要手动操作，比如到浏览器安装本地插件"。
+
+**分两档能力，先认清你要哪一档：**
+
+| 能力 | 需要什么 | 能自动吗 |
+|---|---|---|
+| **插件自带实例**（独立窗口 + 独立 profile，免逐站点授权） | 只要插件装好 + 重启 | ✅ 全自动，`browser_open` 直接开 |
+| **接管你的日常浏览器**（要你的登录态：后台/飞书/公司系统） | **必须装浏览器扩展**（MV3，本仓库 `extension/` 里）+ 粘 token + 逐站点授权 | ❌ 扩展安装与授权只能在浏览器里点 |
+
+**B 档的四步手工操作（agent 只能把现场备好，点不了）**
+
+1. 打开扩展管理页：Chrome `chrome://extensions` / Edge `edge://extensions` → 开**开发者模式**
+2. **加载解压缩的扩展** → 选中本仓库的 `extension/` 目录
+3. 点扩展图标打开弹窗 → 粘贴 **token** → 「连接」
+   - token 在哪：`$DSH_HOME/dsh-browser-live/bridge.json` 的 `token` 字段
+   - **省事做法**：让 agent 调 **`browser_ext_setup`** —— 它会置 `userBridge=true`、把 token 放进剪贴板、
+     打开扩展页、并在文件管理器里打开 `extension/` 目录；人只剩"开发者模式 + 加载 + 粘贴 + 连接"这四下
+4. 在扩展弹窗里逐站点授权：每个要操作的站点点「允许」（默认**只读**）；要真点击/打字/上传，
+   还得打开「**允许操作**」（`allowInput`），否则 agent 只能看不能动
+
+**其余换机事实（都不随仓库走）**
+- 状态与凭据全在 `$DSH_HOME/dsh-browser-live/`：`settings.json`（含 `userBridge` / `headless` /
+  浏览器路径 / 代理等）、`bridge.json`（端口 + token）、`chrome-profile/`（登录态）、
+  `downloads/`、`shots/`、`audit/`（留痕）。**换机器后 `userBridge` 是空的 ⇒ 桥不会自己开**，
+  要重跑一次 `browser_ext_setup` 或手动置 `userBridge: true`。
+- 扩展是 MV3 **本地加载**的，不是商店包 ⇒ 换机器/换浏览器/换 profile 都要重装一遍（第 1–3 步）。
+  扩展掉线时 host 会自动回退到"插件自带实例"这一档，所以"接管失败"往往表现为**换了个后端**而不是报错。
+- 浏览器探测：本机装了 Chrome/Edge/Brave 任一即可；`headless=true` 时无头也能全通，但画面是虚拟的
+  （观察窗看的是渲染结果）。首选浏览器起不来会自动降级到下一个候选，并补试兼容参数 `--in-process-gpu`。
+- 留痕（v0.9.0 起）：所有 `browser_*` 调用与页面自身跳转都追加到
+  `$DSH_HOME/dsh-browser-live/audit/YYYY-MM-DD.jsonl`（append-only + 哈希链）。
+  `node tools/verify-audit-chain.mjs` 验链；`node tools/verify-audit.mjs` 离线自检 15 项。
+- **已知宿主坑（三个插件共有）**：部分 DSH Desktop 版本启动时的 `installGeneration` 迁移会把
+  `link:` 挂载的插件重新 stage，并把**绝对路径当相对路径拼接** ⇒ `ENOENT`、迁移 defer、
+  插件可能不加载。本机靠应用 bundle 的本地补丁（`KEEP_IN_SHARED_TREE`）绕过，**该补丁不在本仓库**；
+  识别：启动日志 `migration deferred` / `could not stage`。DSH 每次升级都会覆盖它，升级后要重跑。
+
+**换机后自查**
+
+```powershell
+node tools/verify-audit.mjs         # 期望 PASS 15 项
+node tools/verify-host.mjs          # 期望 58 passed（3 项 fail 是套件无真 Chrome 的既有失败）
+node tools/verify-audit-chain.mjs   # 期望 0 = 链完整（还没留痕时会跳过并返回 0）
+```
+
 ## 工具一览（agent 侧）
 
 | 工具 | 说明 |
@@ -106,9 +155,41 @@ agent 的鼠标移动（`browser_click` / `browser_move`）默认不再是"瞬�
 ## 数据与隐私
 
 全部落在 `$DSH_HOME/dsh-browser-live/`：`settings.json`、`state.json`、`bridge.json`（用户浏览器桥的端口与 token）、
-`chrome-profile/`（登录态）、`downloads/`、`shots/`。CDP 只绑 `127.0.0.1`；
+`chrome-profile/`（登录态）、`downloads/`、`shots/`、`audit/`（留痕，见下）。CDP 只绑 `127.0.0.1`；
 观察窗路由与宿主其他插件路由（`/bga/*`、`/cc/*`、`/api/*`）互不重叠。
 不关闭浏览器时它会一直在——用完调 `browser_close` 或点面板 ⏹。
+
+### 留痕（v0.9.0：agent 用浏览器做过的每一步都落盘）
+
+动机很直接：agent 完全可以"开浏览器 → 操作 → 自己关掉"，事后你只剩一个空窗口。
+v0.9.0 起，**每一次 `browser_*` 工具调用**（含 `browser_open` / `browser_close`）和
+**每一次页面自己发起的跳转**都会追加到 `$DSH_HOME/dsh-browser-live/audit/YYYY-MM-DD.jsonl`：
+
+| 字段 | 含义 |
+|---|---|
+| `type` | `boot`（宿主启动）/ `tool`（工具调用）/ `nav`（页面发起的跳转） |
+| `tool` / `args` | 工具名与参数原文（超 4000 字截断并标注原文长度，不假装完整） |
+| `ok` / `err` / `ms` | 成功与否、错误信息、耗时 |
+| `urlBefore` / `urlAfter` | 调用前后所在页面的 URL —— "他点了什么、落到哪一页"看这里 |
+| `prev` / `h` | 哈希链：`h` 是本条内容的 sha256，`prev` 指向上一条的 `h` |
+
+收口点只有一个：所有工具都在 `index.js` 的注册循环里被 `withAudit()` 包了一层
+（不是逐个工具加埋点 —— 那样必然会漏，新增工具时还会再漏）。
+
+```powershell
+node tools/verify-audit-chain.mjs                  # 校验今天的留痕链是否完整
+node tools/verify-audit-chain.mjs <文件或目录>
+```
+
+**能力边界（别把它当保险箱）**：追加写 + 哈希链能查出"删了一行 / 改了一行"——
+`tools/verify-audit.mjs` 里就有这两条断链断言。但日志和 agent 在同一台机器、同一个用户下，
+**拥有完整写权限的人可以把整条链重算一遍**，因此它挡的是"顺手抹掉一两步"，不是防篡改。
+真要不可抹，得把这条 JSONL 实时送到 agent 够不到的地方（另一个进程 / 另一台机器）。
+
+另外，**"关掉 agent 自己开的页面"这个权限本来就不在 agent 手里**：它由浏览器右上角扩展弹窗里的
+「允许关闭 agent 自己打开的标签页」开关控制（`extension/popup.js` + `background.js` 的
+`allowCloseOwn` 判定，默认开；关掉之后连它自己开的也关不了），你手动开的页面任何情况下都不在范围内。
+
 
 ## 前置条件
 

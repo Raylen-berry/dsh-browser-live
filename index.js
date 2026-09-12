@@ -38,6 +38,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { BridgeServer, BRIDGE_FILE, DEFAULT_BRIDGE_PORT } from './bridge.js'
+import { createAudit, trim as auditTrim } from './audit.js'
 
 export const name = 'dsh-browser-live'
 export const inject = ['tools', 'webServer']
@@ -90,8 +91,14 @@ const BASE_DIR = () => path.join(dshHome(), 'dsh-browser-live')
 const SETTINGS_FILE = () => path.join(BASE_DIR(), 'settings.json')
 const STATE_FILE = () => path.join(BASE_DIR(), 'state.json')
 const CHROME_PROFILE = (exe) => path.join(BASE_DIR(), 'chrome-profile' + (exe ? '-' + path.basename(exe, path.extname(exe)) : ''))
+const AUDIT_DIR = () => path.join(BASE_DIR(), 'audit')
 const DOWNLOADS_DIR = () => path.join(BASE_DIR(), 'downloads')
 const SHOTS_DIR = () => path.join(BASE_DIR(), 'shots')
+
+// 留痕实例（2026-09-12）：每一次 browser_* 工具调用、每一次页面自己发起的跳转都追加到
+// $DSH_HOME/dsh-browser-live/audit/YYYY-MM-DD.jsonl；详见 audit.js 顶部的能力边界说明。
+// 提取函数（不写盘），便于 tools/verify-audit.mjs 离线测。
+const AUDIT = createAudit(AUDIT_DIR())
 
 // 启动失败后的兼容参数（按顺序补试）。为什么是它：有些机器上安全软件会拦掉 Chrome
 // **GPU 进程**的沙箱初始化（本机实测：火绒 D:\Huorong\Sysdiag\bin\HipsDaemon.exe），
@@ -223,6 +230,53 @@ function defineToolLite(options) {
     },
     ...(options.presentCall ? { presentCall: options.presentCall } : {}),
     async execute(args, exec) { return options.execute(args, exec) },
+  }
+}
+
+// ------------------------------------------------------------------ 留痕包装 --
+// 收口点：**所有** browser_* 工具都由 buildTools(t) → 这里注册，所以包一层 execute
+// 就等于"agent 用浏览器做的每一步都留下一条"，不需要逐个工具去加埋点
+// （逐个加必然会漏，而且以后新增工具又会漏）。
+// 记录内容：工具名、参数（截断但标注长度）、成功/失败、错误信息、耗时、调用前后所在 URL
+// 与 backend —— 这正好回答"他开了浏览器、点了什么、填了什么、去了哪、然后关了没有"。
+function withAudit(tool) {
+  const original = tool && tool.execute
+  if (typeof original !== 'function') return tool
+  const snapshot = () => {
+    try {
+      const s = browser.session
+      const tb = s && s.tabs && s.tabs[0]
+      return { backend: (s && s.backend) || undefined, at: (tb && tb.url) || undefined }
+    } catch { return {} }
+  }
+  return {
+    ...tool,
+    async execute(args, exec) {
+      const t0 = Date.now()
+      const before = snapshot()
+      let out
+      let err = null
+      try {
+        out = await original(args, exec)
+        return out
+      } catch (e) {
+        err = e
+        throw e
+      } finally {
+        const after = snapshot()
+        AUDIT.audit('tool', {
+          tool: tool.name,
+          args: auditTrim(args, 4000),
+          ok: !err,
+          err: err ? String((err && err.message) || err).slice(0, 400) : undefined,
+          ms: Date.now() - t0,
+          backend: before.backend || after.backend,
+          urlBefore: before.at,
+          urlAfter: after.at,
+          result: err ? undefined : auditTrim(out, 1500),
+        })
+      }
+    },
   }
 }
 
@@ -1003,6 +1057,17 @@ async function attachTab(tab, s0, intendedUrl) {
   // 标签页 URL/标题变化 → 同步状态
   cdp.on('Page.javascriptDialogOpening', (p) => {
     if (p.sessionId === sessionId) noteAction(`⚠ ${kindLabel(s.kind)} 页面弹出对话框：` + (p.message || p.type))
+  })
+  // 留痕补口：**页面自己发起**的跳转（点链接触发的导航）不在任何工具参数里，
+  // 只靠工具埋点会看到"点了某个按钮"却看不到"最后落在哪个 URL"。只记主框架，iframe 太吵。
+  cdp.on('Page.frameNavigated', (p) => {
+    try {
+      if (p.sessionId !== sessionId) return
+      const f = p.frame || {}
+      if (f.parentId) return
+      if (!f.url || f.url === 'about:blank') return
+      AUDIT.audit('nav', { url: String(f.url).slice(0, 800), targetId: p.targetId, browser: s.kind, backend: s.backend })
+    } catch { /* 留痕不该影响导航 */ }
   })
   return target
 }
@@ -1954,8 +2019,11 @@ export async function apply(ctx, config) {
   const defineTool = await loadDefineTool()
   const t = makeTool(defineTool)
   const builtTools = buildTools(t)
+  let auditedTools = 0
   for (const tool of builtTools) {
-    ctx.effect(() => ctx.tools.register(tool), `dsh-browser-live: ${tool.name} tool`)
+    const wrapped = withAudit(tool)
+    if (wrapped !== tool) auditedTools++
+    ctx.effect(() => ctx.tools.register(wrapped), `dsh-browser-live: ${tool.name} tool`)
   }
 
   // 立好"插件自带实例"这条会话，并把它设为初始活跃会话（此后 browser.* 视图始终跟着活跃会话走）
@@ -2286,5 +2354,8 @@ export async function apply(ctx, config) {
 
   await syncBridge()
 
-  console.log('[dsh-browser-live] host up (v' + version + ') · ' + builtTools.length + ' 个 browser_* 工具已注册 · 数据目录 ' + BASE_DIR())
+  console.log('[dsh-browser-live] host up (v' + version + ') · ' + builtTools.length + ' 个 browser_* 工具已注册（' + auditedTools + ' 个带留痕） · 数据目录 ' + BASE_DIR())
+  // 本次会话的开头记一条：这样"某天他到底开过几次、每次干了什么"能按 boot 分段读。
+  AUDIT.audit('boot', { version, node: process.version, auditedTools, tools: builtTools.length })
+  console.log('[dsh-browser-live] 留痕目录 ' + AUDIT_DIR() + '（append-only JSONL + 哈希链，校验：node tools/verify-audit-chain.mjs）')
 }
