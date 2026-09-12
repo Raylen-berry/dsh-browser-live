@@ -979,11 +979,28 @@ window.__ModuleLoader__.load({
               '（在扩展弹窗里改）'),
             h('div', { style: { marginTop: 4, wordBreak: 'break-all' } }, 'token: ' + ((br && br.token) || '…'),
               h('button', { className: 'bl-btn', style: { marginLeft: 6, height: 22, padding: '0 7px' }, onClick: function () { try { navigator.clipboard.writeText((br && br.token) || '') ; setNote('token 已复制') ; setTimeout(function () { setNote('') }, 2200) } catch (e) { setNote('复制失败，手动从 bridge.json 取') } } }, '复制')),
+            (br && br.enabled === false)
+              ? h('div', { style: { marginTop: 6 } },
+                h('button', {
+                  className: 'bl-btn', style: { height: 24, padding: '0 9px' },
+                  onClick: function () {
+                    api('/bl/settings.json', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userBridge: true }) })
+                      .then(function (r) { return r && r.ok ? r.json() : null })
+                      .then(function (j) {
+                        if (j && j.ok) { setNote('桥已启用，token 出来了 —— 按下面步骤装扩展'); loadBridge(); setTimeout(function () { setNote('') }, 4000) }
+                        else setNote('启用失败：' + ((j && j.error) || '看 DSH 日志'))
+                      })
+                      .catch(function () { setNote('启用失败，看 DSH 日志') })
+                  },
+                }, '① 启用用户浏览器桥（现在没开，扩展装了也连不上）'))
+              : null,
             h('div', { style: { marginTop: 4 } },
-              '装扩展（Chrome 和 Edge 各装一次，可同时接入）：',
+              (br && br.enabled === false ? '② ' : '') + '装扩展（Chrome 和 Edge 各装一次，可同时接入）：',
               h('div', null, '· Edge：地址栏输 edge://extensions → 打开「开发人员模式」→「加载解压缩的扩展」→ 选 ' + ((br && br.extensionDir) || 'extension 目录')),
               h('div', null, '· Chrome：地址栏输 chrome://extensions → 同上流程'),
-              h('div', null, '· 装完点工具栏里的扩展图标 → 粘上 token → 点「连接」；再点「允许当前所有标签页」把你要交给我操作的站点一次授权。')),
+              h('div', null, '· 装完点工具栏里的扩展图标 → 粘上 token → 点「连接」；再点「允许当前所有标签页」把你要交给我操作的站点一次授权。'),
+              h('div', { style: { marginTop: 2, color: 'var(--dsw-alias-label-tertiary)' } },
+                '· 也可以直接交给 agent：调 browser_ext_setup —— 它会开桥、把 token 放进剪贴板，并把扩展页与扩展目录一起打开。')),
             h('div', { style: { marginTop: 2, color: 'var(--dsw-alias-label-tertiary)' } },
               '怎么用：要登录的站点先在扩展弹窗里点「允许」（或「允许当前所有标签页」），再让我用 browser_open {use:"edge"} 或 {use:"chrome"} 指定这台浏览器；做完 {use:"plugin"} 切回独立窗口。' +
               '边界：默认只读（能看能导航）；「允许操作」打开后我才能真点击/打字/上传，且只在已授权站点上生效；新建/关闭标签页、改网络仍被拒。browser_close 只断开读取，不关你的浏览器。'))

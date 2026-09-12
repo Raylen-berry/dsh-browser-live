@@ -97,6 +97,7 @@ host → 扩展新增消息：
 扩展必须**在 Edge 里再装一次**（Chrome 那份不会共享）——扩展是 per-browser 的，
 就像登录态不会跨浏览器共享一样：
 
+0. （省事）让 agent 调 `browser_ext_setup`：它会开桥、把 token 放进剪贴板，并在 Edge 里打开扩展页、在资源管理器里打开 extension/ 目录 —— 下面 1~3 步里「去找、去开、去复制」的部分它都替你做了。
 1. 地址栏 `edge://extensions` → 打开「开发人员模式」；
 2. 「加载解压缩的扩展」→ 选 `D:\DeepSeek\dsh-plugins\dsh-browser-live\extension`；
 3. 点工具栏扩展图标 → 粘 token（与 Chrome 同一个，`bridge.json` 里的那个）→ 点「连接」；

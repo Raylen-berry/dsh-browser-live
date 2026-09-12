@@ -10,7 +10,7 @@ v0.5.0 起还可选**接管你自己的日常浏览器**（装一个 MV3 扩展�
 ## 它解决什么
 
 DSH 内置的 web_search/web_fetch 只能"读"；凡是**必须真浏览器**的活（登录态、动态渲染、表单、验证码、
-需真人会话的站点）就干不了。装上本插件后，agent 获得 17 个 `browser_*` 工具，能真正在页面里
+需真人会话的站点）就干不了。装上本插件后，agent 获得 18 个 `browser_*` 工具，能真正在页面里
 点击、输入、提交、滚动、取快照；你在观察窗里实时看到每一步，卡在验证码时点进面板亲手代打，
 完事再把鼠标还给 agent。
 
@@ -18,7 +18,7 @@ DSH 内置的 web_search/web_fetch 只能"读"；凡是**必须真浏览器**的
 
 | 文件 | 职责 |
 |---|---|
-| `index.js` | Host（ESM）：拉起/接管 Chrome → CDP；注册 17 个 `browser_*` 工具；`/bl/*` 观察窗后端（SSE 帧流 + 输入回传 + 设置/代理 + 下载取回 + `/bl/view` 独立网页 + `/bl/bridge` 桥状态） |
+| `index.js` | Host（ESM）：拉起/接管 Chrome → CDP；注册 18 个 `browser_*` 工具；`/bl/*` 观察窗后端（SSE 帧流 + 输入回传 + 设置/代理 + 下载取回 + `/bl/view` 独立网页 + `/bl/bridge` 桥状态） |
 | `bridge.js` | 用户浏览器桥（P0）：127.0.0.1 WS 服务端 + token 握手 + 与 `Cdp` 同形的 `send/on/alive/close` |
 | `extension/` | Chrome MV3 扩展（P0）：service worker 当"反向 CDP 客户端"（`chrome.debugger`），弹窗逐站点授权；见 `extension/README.md` |
 | `client.js` | Client 单文件：侧栏 🌐 按钮（无 slots 环境退化为自建浮球；与 bg-atelier 宝珠叠列共存）+ 观察窗（实时帧、标签条、agent 动作条、鼠标键盘接管、FPS/画质、下载取回；内嵌面板可拖动贴边，或切成独立网页） |
@@ -38,6 +38,7 @@ dsh plugin --profile web add link:D:\DeepSeek\dsh-plugins\dsh-browser-live
 | 工具 | 说明 |
 |---|---|
 | `browser_open` | 启动/接管浏览器（懒启动），可选 url / newTab / `use` |
+| `browser_ext_setup` | **一键备好"接管你日常浏览器"的现场**：开桥（`userBridge=true`）→ token 进剪贴板 → 打开目标浏览器的扩展页 → 资源管理器里打开 `extension/` 目录，并把步骤列出。`kind` 选 `edge`/`chrome`，`open:false` 只返回路径与 token |
 | `browser_navigate` | 导航并等加载完成 |
 | `browser_snapshot` | 结构化快照：可见交互元素清单（ref 编号+坐标）+ 正文节选。**点击前先拿 ref** |
 | `browser_click` | ref / CSS selector / 坐标三选一，真实鼠标事件（右键、双击可选）；**默认走拟人贝塞尔轨迹**（`instant:true` 可瞬移） |
@@ -245,7 +246,20 @@ host(index.js) ──WS──> 扩展（extension/, MV3，Chrome 和 Edge 各装
 
 ## 版本与变更记录
 
-- **v0.7.1（2026-09-11 修）**：真圆的方圆角豁免。DSH 主题自带全局规则
+- **v0.8.0**：**装扩展不再靠“看文档”** —— 新增 `browser_ext_setup`，并把“桥没开”和“扩展没装”分开报。
+  - 背景：接管你的浏览器要三件事同时成立（桥开着 / 扩展装着 / token 粘对），而 v0.7.x 只把它们写成文字说明：
+    `use:"edge"` 在**桥没开**时也报“扩展还没连接”，把人引去装一个装了也连不上的扩展；
+    报错不给 `extension/` 绝对路径、不说 token 在哪；面板在桥没开时显示空 token，步骤却照旧摆着。
+  - 新工具 `browser_ext_setup`：开桥（`userBridge=true`，即时生效）→ token 进剪贴板 →
+    打开目标浏览器的扩展页 → 资源管理器里打开本包 `extension/` 目录，并把 5 步操作原样列出。
+    `kind:'edge'|'chrome'`（默认 `settings.userDefault`），`open:false` 只返回路径与 token、不动 UI。
+  - `browser_open {use:"edge"}` 的失败信息分两种情况：**桥没开** → 指向 `browser_ext_setup`；
+    **扩展没装** → 给出扩展页地址 + `extension/` 绝对路径 + `bridge.json` 位置（token 在那）。
+  - 面板：桥没开时出现 **「① 启用用户浏览器桥」** 按钮（一键 `PUT {userBridge:true}` 并刷新状态），
+    安装步骤加序号，并注明“也可以直接交给 agent：调 `browser_ext_setup`”。
+  - `/bl/bridge` 的 hint 带上 `extension/` 绝对路径；`browser_open` 在“一台都没接入”时提示该调谁。
+  - 边界（没变）：「加载已解压缩的扩展程序」是**原生文件选择框，无法自动化** —— 那一下永远得人点；
+    本版做的是把“点哪儿、选哪个目录、粘什么”全部摆到眼前，而不是绕过它。- **v0.7.1（2026-09-11 修）**：真圆的方圆角豁免。DSH 主题自带全局规则
   `*,:before,:after{corner-shape:var(--dsw-corner-shape)}`，而默认值是 `superellipse(1.5)`；
   新版 Chromium 支持 `corner-shape` 后，凡 `border-radius:50%` 的元素都会被画成方圆块
   （用户报的是底图工坊的宝珠，本插件的 `.bl-fab` hover 底衬、`.bl-dot`、

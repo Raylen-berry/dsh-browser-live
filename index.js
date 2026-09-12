@@ -539,10 +539,19 @@ async function useSession(use) {
       const ps = sessionOf('plugin')
       return viewOf(ps), ps
     }
+    // 报错必须分清"桥没开"和"扩展没装"：这两种的下一步动作完全不同，
+    // 混成一句会让用户/agent 去装一个装了也连不上的扩展（v0.7 的老毛病）。
+    const bridgeReady = settings.userBridge === true && !!browser.bridge
+    const wantKind = (u === 'edge' || u === 'chrome') ? u : (settings.userDefault || 'edge')
+    const extPage = wantKind === 'edge' ? 'edge://extensions' : 'chrome://extensions'
     throw new Error(ks.length
       ? `${kindLabel(u)} 未接入（当前连着：${ks.map(kindLabel).join('、')}）。在 ${kindLabel(u)} 里装好扩展并点「连接」，或改用 use:"${ks[0]}"`
-      : `${kindLabel(u)} 未接入：该浏览器里的 DSH Browser Bridge 扩展还没连接。` +
-        '装法：打开 ' + (u === 'edge' ? 'edge://extensions' : 'chrome://extensions') + ' → 开发者模式 → 加载已解压的扩展程序 → 选插件目录下的 extension → 粘 token 点连接')
+      : (bridgeReady
+        ? `${kindLabel(u)} 未接入：该浏览器里的 DSH Browser Bridge 扩展还没连接。`
+          + `装法：打开 ${extPage} → 开发者模式 → 加载已解压的扩展程序 → 选 ${EXTENSION_DIR()} → 粘 token 点连接；`
+          + `token 在 ${BRIDGE_FILE(BASE_DIR())}。调 browser_ext_setup 可以一次把这些都摆到你面前。`
+        : `${kindLabel(u)} 未接入：用户浏览器桥**没启用**（settings.userBridge=false），扩展装了也连不上。`
+          + `调 browser_ext_setup 即可：它打开桥、取出 token，并把 ${extPage} 与扩展目录 ${EXTENSION_DIR()} 一起打开。`))
   }
   lastUse = u
   const s = sessionOf(u)
@@ -572,6 +581,53 @@ function findChrome() {
   )
   for (const t of tries) { try { if (t && existsSync(t)) return t } catch {} }
   return null
+}
+
+/** 本包 extension/ 的绝对路径 —— 装扩展时用户必须选中的那个目录。 */
+function EXTENSION_DIR() {
+  return path.join(path.dirname(fileURLToPath(import.meta.url)), 'extension')
+}
+
+/**
+ * 某个浏览器种类的 exe（装扩展要落到用户**日常那个浏览器**里，不能用 findChrome()：
+ * 它优先返回 Chrome，而用户可能只用 Edge —— 打开错的扩展页等于没帮上忙）。
+ */
+function exeForKind(kind) {
+  const pf = process.env['ProgramFiles'] || 'C:\\Program Files'
+  const pf86 = process.env['ProgramFiles (x86)'] || 'C:\\Program Files (x86)'
+  const lad = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local')
+  const map = {
+    edge: [
+      path.join(pf, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+      path.join(pf86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    ],
+    chrome: [
+      path.join(pf, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      path.join(pf86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      path.join(lad, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    ],
+  }
+  for (const t of (map[kind] || [])) { try { if (existsSync(t)) return t } catch { /* ignore */ } }
+  return null
+}
+
+/** 把一段文本放进 Windows 剪贴板（cmd 的 clip 读 stdin）。失败不致命：返回值里照样给 token。 */
+function copyToClipboard(text) {
+  return new Promise((resolve, reject) => {
+    let p
+    try { p = spawn('cmd.exe', ['/c', 'clip'], { stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true }) }
+    catch (e) { reject(e); return }
+    p.on('error', reject)
+    p.on('close', (code) => (code === 0 ? resolve(true) : reject(new Error('clip 退出码 ' + code))))
+    try { p.stdin.end(String(text)) } catch (e) { reject(e) }
+  })
+}
+
+/** 打开一个"看一眼就行"的外部程序（扩展页 / 资源管理器目录）：detached + unref，不等它退出。 */
+function openDetached(exe, args) {
+  const p = spawn(exe, args, { stdio: 'ignore', detached: true })
+  p.unref()
+  return p
 }
 
 function parseExtraArgs(s) {
@@ -1198,7 +1254,85 @@ function buildTools(t) {
           ? `当前在你的 ${kindLabel(s.kind)} 里：站点未授权会直接报错（点扩展图标 →「允许此站点」或「允许当前所有标签页」）；`
             + '要点击/打字还得在弹窗里打开「允许操作」。要回到免授权、可新开页面的插件自带实例，再调 browser_open {use:"plugin"}。'
           : `当前在插件自带实例（免授权、可新开页面）。要用你的登录态就传 use:"${ks.includes(settings.userDefault) ? settings.userDefault : (ks[0] || 'edge')}"`
-            + `（已接入：${ks.length ? ks.map(kindLabel).join('、') : '暂无'}）；做完再 {use:"plugin"} 切回来。`,
+            + `（已接入：${ks.length ? ks.map(kindLabel).join('、') : '暂无'}）`
+            + (ks.length ? '' : '—— 一台都没接入就先调 browser_ext_setup，它会把桥、token、扩展目录和扩展页一次备好')
+            + '；做完再 {use:"plugin"} 切回来。',
+      }
+    },
+  }))
+
+  tools.push(t({
+    name: 'browser_ext_setup',
+    description: '一键准备「接管你日常浏览器」这件事 —— 把装扩展之前的现场全部摆好。它会：'
+      + '① 打开用户浏览器桥（settings.userBridge=true，即时生效，不用重启 DSH）；'
+      + '② 取出配对 token 并放进剪贴板；③ 在目标浏览器里打开它的扩展页；'
+      + '④ 在资源管理器里打开本包的 extension 目录。'
+      + '你只剩三下点击：开「开发者模式」→「加载解压缩的扩展」选那个目录 → 粘 token 点「连接」。'
+      + '装完用 browser_open {use:"edge"} 验证，再在扩展弹窗里点「允许当前所有标签页」给我操作权限。'
+      + '排查也用它：桥没开 / 扩展没装 / 站点没授权，返回值会写明是哪一种。',
+    parameters: {
+      kind: { type: 'string', description: "装到哪个浏览器：'edge' 或 'chrome'（默认 settings.userDefault，再退回 'edge'）" },
+      open: { type: 'boolean', description: '默认 true：顺手打开扩展页、扩展目录并把 token 放进剪贴板；false 只返回步骤、路径与 token' },
+    },
+    async execute(args) {
+      const kind = String(args.kind || settings.userDefault || 'edge').toLowerCase()
+      if (kind !== 'edge' && kind !== 'chrome') {
+        return { ok: false, error: `kind 只能是 'edge' 或 'chrome'（收到 "${kind}"）` }
+      }
+      const extensionDir = EXTENSION_DIR()
+      const bridgeFile = BRIDGE_FILE(BASE_DIR())
+      const did = []
+
+      // ① 桥：没开着就打开（配置落盘 + 即时起服务，与面板开关同一条路径）
+      if (settings.userBridge !== true) {
+        settings.userBridge = true
+        saveSettings()
+        did.push('已把 settings.userBridge 设为 true 并落盘')
+      }
+      await syncBridge()
+      const st = browser.bridge ? browser.bridge.status() : { enabled: false, connected: false, port: settings.bridgePort }
+      const token = (browser.bridge && browser.bridge.token) || ''
+      if (!st.enabled) {
+        return {
+          ok: false,
+          error: '桥没起来：settings.userBridge 已是 true 但服务没监听本机端口 —— 多半是 ws 包没解析到，看 DSH 日志里 [dsh-browser-live] 的告警',
+          bridge: st, extensionDir, bridgeFile, did,
+        }
+      }
+
+      // ② 摆现场：扩展页 + 扩展目录 + 剪贴板（任何一步失败都只记 warning，不掩盖主流程）
+      const opened = {}
+      if (args.open !== false) {
+        const extPage = kind === 'edge' ? 'edge://extensions' : 'chrome://extensions'
+        const exe = exeForKind(kind)
+        if (exe) {
+          try { openDetached(exe, [extPage]); did.push(`已在 ${kindLabel(kind)} 里打开 ${extPage}`) }
+          catch (e) { opened.browser = '打开扩展页失败：' + String(e?.message || e) }
+        } else { opened.browser = `没找到 ${kindLabel(kind)} 的 exe，请手动打开 ${extPage}` }
+        try { openDetached('explorer.exe', [extensionDir]); did.push('已在资源管理器里打开扩展目录') }
+        catch (e) { opened.explorer = '打开扩展目录失败：' + String(e?.message || e) }
+        try { await copyToClipboard(token); did.push('token 已复制到剪贴板') }
+        catch (e) { opened.clipboard = '复制 token 失败（手动从下面的 token 字段或 ' + bridgeFile + ' 取）：' + String(e?.message || e) }
+      }
+
+      return {
+        ok: true,
+        kind,
+        bridge: { enabled: !!st.enabled, connected: !!st.connected, port: st.port, browsers: browsersView() },
+        token,
+        extensionDir,
+        bridgeFile,
+        did,
+        ...(Object.keys(opened).length ? { warnings: opened } : {}),
+        steps: [
+          `① 在刚打开的 ${kind === 'edge' ? 'Edge' : 'Chrome'} 扩展页右上角打开「开发者模式」`,
+          '② 点「加载解压缩的扩展」（Edge 也可能写作「加载未打包的扩展程序」）',
+          `③ 选中目录：${extensionDir}`,
+          '④ 点工具栏里刚出现的扩展图标 → 粘上 token（应已在剪贴板）→ 点「连接」',
+          '⑤ 再点「允许当前所有标签页」把要交给我操作的站点一次授权；要我真点击/打字，同时打开「允许操作」',
+        ],
+        verify: `装完调 browser_open {use:"${kind}"} 验证：返回值 connected 会列出已接入的浏览器。`,
+        note: '扩展只需装一次；桥重启后 token 会变，变了就在扩展弹窗里重粘一次。',
       }
     },
   }))
@@ -1857,14 +1991,14 @@ export async function apply(ctx, config) {
           // 网页/第三方 origin 读不到它（无 CORS 头），扩展的 WS 也只认 chrome-extension:// 的 Origin。
           token: browser.bridge ? browser.bridge.token : '',
           bridgeFile: BRIDGE_FILE(BASE_DIR()),
-          extensionDir: path.join(path.dirname(fileURLToPath(import.meta.url)), 'extension'),
+          extensionDir: EXTENSION_DIR(),
           browsers: browsersView(),
           userDefault: settings.userDefault,
           hint: settings.userBridge
             ? (st.connected
               ? `扩展已接入：${(st.browsers || []).map((b) => kindLabel(b.kind)).join('、')}`
-              : '扩展未连接：在 Chrome 用 chrome://extensions、在 Edge 用 edge://extensions → 开发者模式 → 加载已解压的扩展程序 → 选 extension 目录，再把 token 粘进弹窗')
-            : '桥未启用：settings.json 里把 userBridge 设为 true（或 PUT /bl/settings.json）',
+              : `扩展未连接：在 Edge 用 edge://extensions、在 Chrome 用 chrome://extensions → 开发者模式 → 加载已解压的扩展程序 → 选 ${EXTENSION_DIR()}，再把 token 粘进弹窗（agent 调 browser_ext_setup 可一键把这些都打开）`)
+            : '桥未启用：点面板上的「启用桥」按钮，或让 agent 调 browser_ext_setup（等价于 PUT /bl/settings.json {userBridge:true}）',
         })
       },
     }), 'bl: bridge route'))
