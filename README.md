@@ -74,6 +74,17 @@ dsh plugin --profile web add link:D:\DeepSeek\dsh-plugins\dsh-browser-live
   插件可能不加载。本机靠应用 bundle 的本地补丁（`KEEP_IN_SHARED_TREE`）绕过，**该补丁不在本仓库**；
   识别：启动日志 `migration deferred` / `could not stage`。DSH 每次升级都会覆盖它，升级后要重跑。
 
+**设置导出/导入（换机器一键搬配置，v0.9.0 新增）**
+
+```powershell
+node tools/settings.mjs export --out D:\bl-settings.json   # 旧机器
+node tools/settings.mjs import D:\bl-settings.json --yes   # 新机器（覆盖前自动备份 settings.json.bak-*）
+```
+`show` 看当前值；不带 `--yes` 演练。会搬 fps / 质量 / 无头 / 窗口尺寸 / 代理 / 观察窗形态 /
+拟人轨迹与速度 / `userBridge` / `backendMode` / `userDefault` / 端口，并**主动提示两件换机后必须人做的事**：
+`userBridge=true` 说明还要人工装扩展 + 重跑 `browser_ext_setup`；`chromePath` 指向的路径在新机器上可能不存在（空了会自动探测）。
+**不含**：浏览器扩展、`bridge.json` 的 token、`chrome-profile/` 登录态、`audit/` 留痕 —— 这四样本就该每台机器各自一份。
+
 **换机后自查**
 
 ```powershell
