@@ -41,7 +41,10 @@ import { BridgeServer, BRIDGE_FILE, DEFAULT_BRIDGE_PORT } from './bridge.js'
 
 export const name = 'dsh-browser-live'
 export const inject = ['tools', 'webServer']
-export const version = '0.7.0'
+// 版本号以 package.json 为准。这里原来写死成字符串，于是 bump package.json 之后
+// 日志的 `host up (vX)` 和桥握手的 hostVersion 还报旧版本（v0.8.0 已经踩过一次）。
+const HOST_PKG = JSON.parse(readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'package.json'), 'utf8'))
+export const version = String(HOST_PKG.version || '0.0.0')
 
 // ---------------------------------------------------------------- utilities
 
