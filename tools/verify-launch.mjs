@@ -32,7 +32,13 @@ const args = [
 ]
 const vbs = mod.writeDetachedLauncher(exe, args)
 ok(typeof vbs === 'string' && existsSync(vbs), 'writeDetachedLauncher 落盘了 VBS', String(vbs))
-const src = readFileSync(vbs, 'utf8')
+// v0.8.2 起 VBS 必须写 **UTF-16LE + BOM**：wscript 默认按本机 ANSI 代码页读 .vbs，
+// 而用户名/路径里只要有中文（C:\Users\陈道云\…），UTF-8 写出来的就会被读成
+// `C:\Users\闄堥亾浜慭\…` —— 一条不存在的路径，浏览器一个进程都不会起，且失败是静默的。
+// 所以这里既断言字节序标记，也断言能按 UTF-16 原样读回。
+const rawVbs = readFileSync(vbs)
+ok(rawVbs[0] === 0xff && rawVbs[1] === 0xfe, 'VBS 以 UTF-16LE BOM（FF FE）开头 —— wscript 才会按 Unicode 读', [...rawVbs.slice(0, 2)])
+const src = rawVbs.toString('utf16le').replace(/^\ufeff/, '')
 ok(/WScript\.Shell/.test(src), '用 WScript.Shell（不依赖任何外部程序）')
 ok(/sh\.Run .*,\s*1,\s*False/.test(src), 'Run 的窗口样式=1 且不等待（False）—— 可见窗口 + 立刻返回')
 ok(src.includes('""' + exe + '""') || src.includes('"' + exe + '"'), 'Chrome 路径原样带引号（含空格的 Program Files 路径）', src.split('\r\n')[2])
@@ -41,9 +47,16 @@ ok((src.match(/--user-data-dir=/g) || []).length === 1, '每个参数只出现�
 ok(!/\r\n\r\n\r\n/.test(src), '没有意外的空行堆积')
 ok(src.includes('sh.CurrentDirectory'), '设了 CurrentDirectory（Chrome 的工作目录不依赖启动器 cwd）')
 
+// 中文用户名：这是本机真实踩过的坑（乱码路径 + C:\Users 下留下乱码目录），单独钉一条
+const cnVbs = mod.writeDetachedLauncher('C:\\Users\\陈道云\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe',
+  ['--user-data-dir=C:\\Users\\陈道云\\prof', 'about:blank'])
+const cnSrc = readFileSync(cnVbs, 'utf16le').replace(/^\ufeff/, '')
+ok(cnSrc.includes('陈道云') && !cnSrc.includes('闄堥亾浜'), '中文用户名原样保留（不会被写成本机代码页乱码）')
+ok(!cnSrc.includes('\ufffd'), '脚本里没有替换字符（说明按 UTF-16 解码正确）')
+
 // 反例：参数里带引号时，VBScript 字符串必须把 " 变成 ""（否则脚本直接语法错，静默失败）
 const tricky = mod.writeDetachedLauncher(exe, ['--user-data-dir=C:\\a"b\\c', 'about:blank'])
-const trickySrc = readFileSync(tricky, 'utf8')
+const trickySrc = readFileSync(tricky, 'utf16le').replace(/^\ufeff/, '')
 ok(!/[^"]"[^"]*"[^"]*"[^"]*"[^"]*\.exe/.test(trickySrc) || trickySrc.includes('""'), '参数含引号时做了 "" 转义', trickySrc.split('\r\n')[2])
 
 // ---------------------------------------------------------------- 2) 窗口自查（假 CDP）
