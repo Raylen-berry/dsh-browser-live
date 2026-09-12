@@ -252,7 +252,10 @@ export async function handleCommand({ method, params = {}, sessionId }) {
     if (!Number.isInteger(tabId)) throw new Error('targetId 非法')
     // intendedUrl（host 给的"这次想去哪"）：当前页未授权、而目标页已授权时，
     // 先导航到目标页再附加 —— 见 attachTab 里的说明。
-    return { sessionId: await attachTab(tabId, raw(params.intendedUrl)) }
+    // 注意**不能**走 raw()/rawSid()：那个函数剥的是 sessionId 的 kind 前缀，
+    // 会把 URL 里的 `https:` 当成前缀剥掉，目标站点于是判成未授权（v0.8.1 踩过）。
+    const intendedUrl = typeof params.intendedUrl === 'string' ? params.intendedUrl : ''
+    return { sessionId: await attachTab(tabId, intendedUrl) }
   }
   if (method === 'Target.detachFromTarget') {
     // params.sessionId 也来自 host（可能是带前缀的），同样走入口边界
