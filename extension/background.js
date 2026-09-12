@@ -136,32 +136,34 @@ async function listTabs() {
 
 async function attachTab(tabId0, intendedUrl) {
   let tabId = tabId0
-  if (state.byTab.has(tabId)) return { sessionId: state.byTab.get(tabId), tabId }
   let tab = await chrome.tabs.get(tabId).catch(() => null)
   if (!tab) throw new Error('标签页不存在（可能已关闭）')
-  if (!isAllowed(tab.url)) {
-    const want = String(intendedUrl || '')
+  const want = String(intendedUrl || '')
+  // ⚠ 顺序很要紧：「要不要换一个标签页」必须判在 byTab 缓存**之前**。
+  // v0.8.3 的第一版把它放在缓存之后，于是"已经附着过的未授权前台页"走了缓存直接返回，
+  // 就地导航的老行为又回来了 —— 实测踩到（前台先被 browser_navigate 附着过，再 browser_open 就中招）。
+  if (!isAllowed(tab.url) && want && isAllowed(want)) {
     // 只放行「去一个已授权站点」这一种情况，而且**绝不动你正在看的那个页面**：
     // 新开一个标签页过去、附加到**新标签页**。（v0.8.1 原来是就地导航，会把你前台的页面顶掉 ——
     // 你只是让 agent 去看一眼别的东西，不该付出"我正在读的页面被换掉"的代价。）
     // 隐私底线不变：agent 拿不到未授权页面的调试器 —— attach 永远发生在"页面已经是已授权站点"之后。
-    if (want && isAllowed(want)) {
-      note(`当前页未授权 → 新开标签页去已授权站点 ${originOf(want)}（不动你现在的页面）`)
-      const created = await chrome.tabs.create({ url: want, active: true }).catch(() => null)
-      if (!created || created.id === undefined) throw new Error('浏览器拒绝了新开标签页（tabs.create 失败）')
-      tabId = created.id
-      for (let i = 0; i < 50; i++) {           // 最多等 5s 落到已授权 origin
-        await sleep(100)
-        tab = await chrome.tabs.get(tabId).catch(() => null)
-        if (tab && isAllowed(tab.url)) break
-      }
-      if (!tab || !isAllowed(tab.url)) {
-        throw new Error(`新开的标签页没能落在已授权站点 ${originOf(want)}（当前 ${originOf(tab && tab.url) || '未知'}），已放弃附加`)
-      }
-    } else {
-      const o = originOf(tab.url) || '该页面'
-      throw new Error(`站点未授权：${o}。点扩展图标 →「允许此站点」后再试（P0 逐站点授权）`)
+    note(`当前页未授权 → 新开标签页去已授权站点 ${originOf(want)}（不动你现在的页面）`)
+    const created = await chrome.tabs.create({ url: want, active: true }).catch(() => null)
+    if (!created || created.id === undefined) throw new Error('浏览器拒绝了新开标签页（tabs.create 失败）')
+    tabId = created.id
+    for (let i = 0; i < 50; i++) {           // 最多等 5s 落到已授权 origin
+      await sleep(100)
+      tab = await chrome.tabs.get(tabId).catch(() => null)
+      if (tab && isAllowed(tab.url)) break
     }
+    if (!tab || !isAllowed(tab.url)) {
+      throw new Error(`新开的标签页没能落在已授权站点 ${originOf(want)}（当前 ${originOf(tab && tab.url) || '未知'}），已放弃附加`)
+    }
+  } else if (state.byTab.has(tabId)) {
+    return { sessionId: state.byTab.get(tabId), tabId }   // 这个标签页本来就是已授权且已附着，直接用
+  } else if (!isAllowed(tab.url)) {
+    const o = originOf(tab.url) || '该页面'
+    throw new Error(`站点未授权：${o}。点扩展图标 →「允许此站点」后再试（P0 逐站点授权）`)
   }
   await chrome.debugger.attach({ tabId }, '1.3')
   const sessionId = `bl-${tabId}-${++state.seq}`

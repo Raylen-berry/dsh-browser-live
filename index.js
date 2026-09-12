@@ -1020,9 +1020,12 @@ async function selectedTab(s0, intendedUrl) {
   }
   if (!s.selected) s.selected = s.tabs[0].targetId
   const tab = s.tabs.find((t) => t.targetId === s.selected)
-  await attachTab(tab, s, intendedUrl)
+  // 必须用 attachTab 的**返回值**：用户浏览器档在"当前页未授权、目标站已授权"时会新开标签页，
+  // 真正被附着的不是点名的那个。v0.8.3 第一版返回了旧的 tab，于是 browser_open 又把前台那个
+  // 未授权页导航了一遍 —— 新标签页开了、你正在看的页面却照样被改写，等于白改。
+  const attached = await attachTab(tab, s, intendedUrl)
   if (browser.session === s) viewOf(s)
-  return tab
+  return attached
 }
 
 async function evaluate(tab, expression, awaitIt = false) {

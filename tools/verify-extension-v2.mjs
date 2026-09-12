@@ -321,6 +321,21 @@ section('B. mock chrome：真加载 background.js，端到端跑新增弹窗动�
     try { await bgMod.handleCommand({ method: 'Target.attachToTarget', params: { targetId: '24', intendedUrl: 'https://d.test/never' } }) } catch (e) { e2 = e.message }
     ok(/未授权/.test(e2) && nav.length === 0, '目标站也未授权：仍然拒绝，既不新开标签页也不导航', JSON.stringify({ e2, nav }))
 
+    // C.（回归）"**已经附着过**、但现在未授权"的前台页：不能因为走 byTab 缓存就地放行。
+    //    这正是本机实测踩到的坑：先用 browser_navigate 把前台页附着成未授权，再 browser_open 时
+    //    attachTab 命中缓存直接返回 → 老的就地导航行为复活，你正在看的页面照样被改写。
+    await P.save({ origins: ['https://c.test:8443'], allowAll: false, allowInput: false, autoConnect: false })
+    const cAtt = await bgMod.handleCommand({ method: 'Target.attachToTarget', params: { targetId: '24' } })
+    ok(!!cAtt && !!cAtt.sessionId, '先允许 c.test 并附着 #24（造出"已附着"状态）', cAtt)
+    await P.save({ origins: ['https://a.test'], allowAll: false, allowInput: false, autoConnect: false })   // 撤销 c.test
+    nav.length = 0
+    const cNew = await bgMod.handleCommand({ method: 'Target.attachToTarget', params: { targetId: '24', intendedUrl: 'https://a.test/landing2' } })
+    ok(nav[0] === 'create:https://a.test/landing2' && String(cNew.tabId) !== '24',
+      '已附着但已变未授权的前台页：同样新开标签页（顺序必须判在 byTab 缓存之前）', JSON.stringify({ nav, cNew }))
+    ok(TABS.find((x) => x.id === 24).url === 'https://c.test:8443/w',
+      '那个已附着的未授权页也没被导航（你正在看的页面不该被改写）', TABS.find((x) => x.id === 24).url)
+    await bgMod.__internals.detachSession(cNew.sessionId)
+
     globalThis.chrome.tabs.update = realUpdate
     globalThis.chrome.tabs.create = realCreate
     globalThis.chrome.debugger.attach = realAttach
