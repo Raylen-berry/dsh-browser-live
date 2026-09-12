@@ -270,6 +270,40 @@ section('B. mock chrome：真加载 background.js，端到端跑新增弹窗动�
   const attOk = await bgMod.handleCommand({ method: 'Target.attachToTarget', params: { targetId: '21' } })
   ok(/^bl-21-\d+$/.test(attOk.sessionId), 'allowAll 打开时 attach 仍成功，且内部 sessionId 无前缀', attOk.sessionId)
   ok(!String(attOk.sessionId).includes(':'), 'handleCommand 返回给内部调用方的 sessionId 是无前缀的（前缀只在 onCommand 出口加）')
+
+  // ---- v0.8.1：当前页未授权 + 目标站已授权 → 扩展**先导航、再附加**。
+  // 替身不记录 tabs.update / debugger.attach，这里临时包一层来观测**顺序** ——
+  // 顺序正是这条改动的要害：attach 必须在导航之后，agent 才拿不到未授权页面的调试器。
+  {
+    const nav = []
+    const realUpdate = globalThis.chrome.tabs.update
+    const realAttach = globalThis.chrome.debugger.attach
+    globalThis.chrome.tabs.update = async (id, props) => {
+      nav.push('update:' + ((props && props.url) || ''))
+      const t = TABS.find((x) => x.id === id)
+      if (t && props && props.url) t.url = props.url          // 模拟真导航：URL 真的变了
+      return {}
+    }
+    globalThis.chrome.debugger.attach = async (targetOrId) => {
+      nav.push('attach:' + (targetOrId && targetOrId.tabId !== undefined ? targetOrId.tabId : targetOrId))
+    }
+    await P.save({ origins: ['https://a.test'], allowAll: false, allowInput: false, autoConnect: false })
+
+    // A. 前台页是 b.test（未授权）、目标是已授权的 a.test → 先导航过去再附加
+    const st = await bgMod.handleCommand({ method: 'Target.attachToTarget', params: { targetId: '22', intendedUrl: 'https://a.test/landing' } })
+    ok(/^bl-22-\d+$/.test(String(st.sessionId)) && nav.join(' → ') === 'update:https://a.test/landing → attach:22',
+      '未授权页 + 已授权目标站：先导航、再附加（顺序不能反）', JSON.stringify({ st, nav }))
+    await bgMod.__internals.detachSession(st.sessionId)
+
+    // B. 目标站也没授权 → 仍然拒绝，且**不产生任何导航**（隐私底线不变）
+    nav.length = 0
+    let e2 = ''
+    try { await bgMod.handleCommand({ method: 'Target.attachToTarget', params: { targetId: '24', intendedUrl: 'https://d.test/never' } }) } catch (e) { e2 = e.message }
+    ok(/未授权/.test(e2) && nav.length === 0, '目标站也未授权：仍然拒绝，且一步都不导航', JSON.stringify({ e2, nav }))
+
+    globalThis.chrome.tabs.update = realUpdate
+    globalThis.chrome.debugger.attach = realAttach
+  }
   await bgMod.disconnect()
 }
 

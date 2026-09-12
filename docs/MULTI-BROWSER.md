@@ -97,6 +97,7 @@ host → 扩展新增消息：
 扩展必须**在 Edge 里再装一次**（Chrome 那份不会共享）——扩展是 per-browser 的，
 就像登录态不会跨浏览器共享一样：
 
+0.5 （v0.8.1）目标站已授权、当前前台页未授权时不会再被闸死：host 会把目标 URL 随 `Target.attachToTarget` 传成 `intendedUrl`，扩展**先把标签页导航过去、再附加调试器**（隐私底线不变：agent 拿不到未授权页面的调试器）。
 0. （省事）让 agent 调 `browser_ext_setup`：它会开桥、把 token 放进剪贴板，并在 Edge 里打开扩展页、在资源管理器里打开 extension/ 目录 —— 下面 1~3 步里「去找、去开、去复制」的部分它都替你做了。
 1. 地址栏 `edge://extensions` → 打开「开发人员模式」；
 2. 「加载解压缩的扩展」→ 选 `D:\DeepSeek\dsh-plugins\dsh-browser-live\extension`；

@@ -134,13 +134,31 @@ async function listTabs() {
   try { return await chrome.tabs.query({}) } catch { return [] }
 }
 
-async function attachTab(tabId) {
+async function attachTab(tabId, intendedUrl) {
   if (state.byTab.has(tabId)) return state.byTab.get(tabId)
-  const tab = await chrome.tabs.get(tabId).catch(() => null)
+  let tab = await chrome.tabs.get(tabId).catch(() => null)
   if (!tab) throw new Error('标签页不存在（可能已关闭）')
   if (!isAllowed(tab.url)) {
-    const o = originOf(tab.url) || '该页面'
-    throw new Error(`站点未授权：${o}。点扩展图标 →「允许此站点」后再试（P0 逐站点授权）`)
+    const want = String(intendedUrl || '')
+    // 只放行「把该标签页导航到一个已授权站点」这一种情况，而且是**先导航、再附加**：
+    // agent 永远拿不到未授权页面的调试器，P0 的隐私底线不变。
+    // 解决的正是最常见的用法：我允许了 github.com，但你当前前台开着别的（未授权）页面，
+    // 于是"切到你的浏览器"这一步就被闸死 —— 目标站授权了等于没用。
+    if (want && isAllowed(want)) {
+      note(`当前页未授权 → 先把标签页 #${tabId} 导航到已授权站点 ${originOf(want)} 再附加`)
+      await chrome.tabs.update(tabId, { url: want })
+      for (let i = 0; i < 50; i++) {           // 最多等 5s 落到已授权 origin
+        await sleep(100)
+        tab = await chrome.tabs.get(tabId).catch(() => null)
+        if (tab && isAllowed(tab.url)) break
+      }
+      if (!tab || !isAllowed(tab.url)) {
+        throw new Error(`导航到 ${want} 之后仍未落在已授权站点（当前 ${originOf(tab && tab.url) || '未知'}），已放弃附加`)
+      }
+    } else {
+      const o = originOf(tab.url) || '该页面'
+      throw new Error(`站点未授权：${o}。点扩展图标 →「允许此站点」后再试（P0 逐站点授权）`)
+    }
   }
   await chrome.debugger.attach({ tabId }, '1.3')
   const sessionId = `bl-${tabId}-${++state.seq}`
@@ -232,7 +250,9 @@ export async function handleCommand({ method, params = {}, sessionId }) {
   if (method === 'Target.attachToTarget') {
     const tabId = Number(params.targetId)
     if (!Number.isInteger(tabId)) throw new Error('targetId 非法')
-    return { sessionId: await attachTab(tabId) }
+    // intendedUrl（host 给的"这次想去哪"）：当前页未授权、而目标页已授权时，
+    // 先导航到目标页再附加 —— 见 attachTab 里的说明。
+    return { sessionId: await attachTab(tabId, raw(params.intendedUrl)) }
   }
   if (method === 'Target.detachFromTarget') {
     // params.sessionId 也来自 host（可能是带前缀的），同样走入口边界

@@ -892,10 +892,15 @@ function prefixSid(s, sid) {
   return id.startsWith(s.kind + ':') ? id : `${s.kind}:${id}`
 }
 
-async function attachTab(tab, s0) {
+async function attachTab(tab, s0, intendedUrl) {
   if (tab.sessionId) return tab
   const s = s0 || browser.session
-  const att = await s.cdp.send('Target.attachToTarget', { targetId: tab.targetId, flatten: true })
+  const params = { targetId: tab.targetId, flatten: true }
+  // 用户浏览器档：把"这次想去哪个站点"一并交给扩展。当前页未授权、目标页已授权时，
+  // 扩展会**先导航过去再附加**（extension/background.js 的 attachTab）——
+  // 否则"我允许了 github.com，但前台开着别的页"这种最常见用法会在切会话这一步就被闸死。
+  if (intendedUrl && isUserKind(s.kind)) params.intendedUrl = String(intendedUrl)
+  const att = await s.cdp.send('Target.attachToTarget', params)
   const sessionId = prefixSid(s, att && att.sessionId)
   tab.sessionId = sessionId
   // 注意：事件监听挂在**本会话自己的传输**上，且闭包持有本会话的 sessionId —— 这样
@@ -912,7 +917,7 @@ async function attachTab(tab, s0) {
   return tab
 }
 
-async function selectedTab(s0) {
+async function selectedTab(s0, intendedUrl) {
   const s = s0 || browser.session
   if (!aliveOf(s)) throw new Error('浏览器未运行；先 browser_open')
   await refreshTabs(s)
@@ -926,7 +931,7 @@ async function selectedTab(s0) {
   }
   if (!s.selected) s.selected = s.tabs[0].targetId
   const tab = s.tabs.find((t) => t.targetId === s.selected)
-  await attachTab(tab, s)
+  await attachTab(tab, s, intendedUrl)
   if (browser.session === s) viewOf(s)
   return tab
 }
@@ -1236,7 +1241,9 @@ function buildTools(t) {
       }
       const s = await useSession(args.use)
       if (!aliveOf(s)) await launch()
-      const tab = await selectedTab()
+      // 把目标 URL 交给 selectedTab：用户浏览器档若当前页未授权、而目标页已授权，
+      // 扩展会先导航过去再附加（见 attachTab 的 intendedUrl）。
+      const tab = await selectedTab(s, url)
       if (url) {
         if (args.newTab) { const { targetId } = await browser.cdp.send('Target.createTarget', { url }); browser.selected = targetId; await refreshTabs(); await attachTab(browser.tabs.find((x) => x.targetId === targetId)) }
         else { await gotoUrl(tab, url) }
@@ -1358,7 +1365,7 @@ function buildTools(t) {
     name: 'browser_navigate',
     description: '导航到 URL（自动等加载完成）。',
     parameters: { url: { type: 'string', required: true, description: '目标 URL；无 scheme 时自动补 https://' } },
-    async execute(args) { const tab = await selectedTab(); return gotoUrl(tab, args.url) },
+    async execute(args) { const tab = await selectedTab(undefined, args.url); return gotoUrl(tab, args.url) },
   }))
 
   tools.push(t({
