@@ -134,26 +134,29 @@ async function listTabs() {
   try { return await chrome.tabs.query({}) } catch { return [] }
 }
 
-async function attachTab(tabId, intendedUrl) {
-  if (state.byTab.has(tabId)) return state.byTab.get(tabId)
+async function attachTab(tabId0, intendedUrl) {
+  let tabId = tabId0
+  if (state.byTab.has(tabId)) return { sessionId: state.byTab.get(tabId), tabId }
   let tab = await chrome.tabs.get(tabId).catch(() => null)
   if (!tab) throw new Error('标签页不存在（可能已关闭）')
   if (!isAllowed(tab.url)) {
     const want = String(intendedUrl || '')
-    // 只放行「把该标签页导航到一个已授权站点」这一种情况，而且是**先导航、再附加**：
-    // agent 永远拿不到未授权页面的调试器，P0 的隐私底线不变。
-    // 解决的正是最常见的用法：我允许了 github.com，但你当前前台开着别的（未授权）页面，
-    // 于是"切到你的浏览器"这一步就被闸死 —— 目标站授权了等于没用。
+    // 只放行「去一个已授权站点」这一种情况，而且**绝不动你正在看的那个页面**：
+    // 新开一个标签页过去、附加到**新标签页**。（v0.8.1 原来是就地导航，会把你前台的页面顶掉 ——
+    // 你只是让 agent 去看一眼别的东西，不该付出"我正在读的页面被换掉"的代价。）
+    // 隐私底线不变：agent 拿不到未授权页面的调试器 —— attach 永远发生在"页面已经是已授权站点"之后。
     if (want && isAllowed(want)) {
-      note(`当前页未授权 → 先把标签页 #${tabId} 导航到已授权站点 ${originOf(want)} 再附加`)
-      await chrome.tabs.update(tabId, { url: want })
+      note(`当前页未授权 → 新开标签页去已授权站点 ${originOf(want)}（不动你现在的页面）`)
+      const created = await chrome.tabs.create({ url: want, active: true }).catch(() => null)
+      if (!created || created.id === undefined) throw new Error('浏览器拒绝了新开标签页（tabs.create 失败）')
+      tabId = created.id
       for (let i = 0; i < 50; i++) {           // 最多等 5s 落到已授权 origin
         await sleep(100)
         tab = await chrome.tabs.get(tabId).catch(() => null)
         if (tab && isAllowed(tab.url)) break
       }
       if (!tab || !isAllowed(tab.url)) {
-        throw new Error(`导航到 ${want} 之后仍未落在已授权站点（当前 ${originOf(tab && tab.url) || '未知'}），已放弃附加`)
+        throw new Error(`新开的标签页没能落在已授权站点 ${originOf(want)}（当前 ${originOf(tab && tab.url) || '未知'}），已放弃附加`)
       }
     } else {
       const o = originOf(tab.url) || '该页面'
@@ -167,7 +170,7 @@ async function attachTab(tabId, intendedUrl) {
   try { await chrome.action.setBadgeBackgroundColor({ color: '#c62828' }) } catch { /* ignore */ }
   try { await chrome.action.setBadgeText({ tabId, text: '●' }) } catch { /* ignore */ }
   note(`已附加标签页 #${tabId}`)
-  return sessionId
+  return { sessionId, tabId }
 }
 
 async function detachSession(sessionId) {
@@ -255,7 +258,11 @@ export async function handleCommand({ method, params = {}, sessionId }) {
     // 注意**不能**走 raw()/rawSid()：那个函数剥的是 sessionId 的 kind 前缀，
     // 会把 URL 里的 `https:` 当成前缀剥掉，目标站点于是判成未授权（v0.8.1 踩过）。
     const intendedUrl = typeof params.intendedUrl === 'string' ? params.intendedUrl : ''
-    return { sessionId: await attachTab(tabId, intendedUrl) }
+    const att = await attachTab(tabId, intendedUrl)
+    // 真实 tabId 必须一起报回去：当前页未授权时扩展会**新开标签页**，
+    // 附加的很可能不是 host 点名的那个标签页；host 不据此纠正映射的话，
+    // 列表里会显示"旧标签页已附加"，而 agent 的截图/点击其实落在新标签页上。
+    return { sessionId: att.sessionId, tabId: String(att.tabId) }
   }
   if (method === 'Target.detachFromTarget') {
     // params.sessionId 也来自 host（可能是带前缀的），同样走入口边界

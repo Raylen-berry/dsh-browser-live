@@ -93,6 +93,27 @@ const CHROME_PROFILE = (exe) => path.join(BASE_DIR(), 'chrome-profile' + (exe ? 
 const DOWNLOADS_DIR = () => path.join(BASE_DIR(), 'downloads')
 const SHOTS_DIR = () => path.join(BASE_DIR(), 'shots')
 
+// 启动失败后的兼容参数（按顺序补试）。为什么是它：有些机器上安全软件会拦掉 Chrome
+// **GPU 进程**的沙箱初始化（本机实测：火绒 D:\Huorong\Sysdiag\bin\HipsDaemon.exe），
+// 表现是"进程起来又立刻静默退出、日志停在 variations setup、没有任何报错"。
+// `--in-process-gpu` 让 GPU 跑在浏览器进程里，绕开那一步，而**渲染器沙箱仍然保留** ——
+// 刻意**不**用 `--no-sandbox`：那是把整台浏览器的沙箱都关掉，拿它当 agent 浏览器的代价太大。
+const COMPAT_FLAGS = ['--in-process-gpu']
+
+export function readState() {
+  try { return JSON.parse(readFileSync(STATE_FILE(), 'utf8')) || {} } catch { return {} }
+}
+export function writeState(patch) {
+  try { writeFileSync(STATE_FILE(), JSON.stringify({ ...readState(), ...patch }), 'utf8') } catch { /* 状态文件写不了不该影响启动 */ }
+}
+/** 上一次"某个浏览器 + 某组兼容参数"成功过 → 直接用，省掉每轮都要先失败 10 秒。 */
+export function compatFlagsFor(exe) {
+  const c = readState().compat
+  const f = c && c[path.basename(exe)]
+  return Array.isArray(f) ? f : []
+}
+export { COMPAT_FLAGS }
+
 const DEFAULT_SETTINGS = Object.freeze({
   fps: 2,            // 观察窗帧率（0.5~10）
   quality: 60,       // SSE JPEG 质量（20~90）
@@ -783,75 +804,86 @@ async function launch() {
     // 选一个**本机没有别的 CDP 在听**的端口：9600~9899 里随机挑也可能正好撞上别的浏览器
     // （或上次没退干净的实例）的调试端口，那时 probePort 会返回**别人**的 WebSocket，
     // 插件就附加到错误的那台浏览器上了（本机实测撞到过 Edge 的调试实例）。
-    let port = 0
-    for (let i = 0; i < 24; i++) {
-      const cand = 9600 + Math.floor(Math.random() * 300)
-      if (!(await probePort(cand))) { port = cand; break }
-    }
-    if (!port) { failures.push(label + '：9600~9899 端口全被占用'); continue }
+    // 尝试序列：先按"记住的成功参数"（或什么都不加）试一次，失败再补一轮兼容参数。
+    const saved = compatFlagsFor(exe)
+    const attempts = saved.length ? [saved] : [[], COMPAT_FLAGS]
+    for (const extra of attempts) {
+      // 选一个**本机没有别的 CDP 在听**的端口：9600~9899 里随机挑也可能正好撞上别的浏览器
+      // （或上次没退干净的实例）的调试端口，那时 probePort 会返回**别人**的 WebSocket，
+      // 插件就附加到错误的那台浏览器上了（本机实测撞到过 Edge 的调试实例）。
+      let port = 0
+      for (let i = 0; i < 24; i++) {
+        const cand = 9600 + Math.floor(Math.random() * 300)
+        if (!(await probePort(cand))) { port = cand; break }
+      }
+      if (!port) { failures.push(label + '：9600~9899 端口全被占用'); break }
 
-    // 每个浏览器用**各自的** profile 目录：Chrome 与 Edge 共用一个目录会互相改对方的数据。
-    const profile = CHROME_PROFILE(exe)
-    mkdirSync(profile, { recursive: true })
-    const args = [
-      `--remote-debugging-port=${port}`,
-      '--remote-allow-origins=*',
-      `--user-data-dir=${profile}`,
-      '--no-first-run', '--no-default-browser-check',
-      '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows',
-      `--window-size=${settings.windowSize}`,
-      // 代理：独立实例也走你指定的出口（http://host:port / socks5://host:port）；留空=跟随系统
-      ...(settings.proxy ? [`--proxy-server=${settings.proxy}`] : []),
-      ...parseExtraArgs(settings.extraArgs),
-      ...(settings.headless ? ['--headless=new'] : []),
-      'about:blank',
-    ]
-    let launched = false
-    if (settings.launchDetached !== false) {
-      try {
-        const vbs = writeDetachedLauncher(exe, args)
-        const wscriptExe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'wscript.exe')
-        browser.proc = spawn(wscriptExe, [vbs], { stdio: 'ignore', windowsHide: true })
+      // 每个浏览器用**各自的** profile 目录：Chrome 与 Edge 共用一个目录会互相改对方的数据。
+      const profile = CHROME_PROFILE(exe)
+      mkdirSync(profile, { recursive: true })
+      const args = [
+        `--remote-debugging-port=${port}`,
+        '--remote-allow-origins=*',
+        `--user-data-dir=${profile}`,
+        '--no-first-run', '--no-default-browser-check',
+        '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows',
+        `--window-size=${settings.windowSize}`,
+        // 代理：独立实例也走你指定的出口（http://host:port / socks5://host:port）；留空=跟随系统
+        ...(settings.proxy ? [`--proxy-server=${settings.proxy}`] : []),
+        ...parseExtraArgs(settings.extraArgs),
+        ...(settings.headless ? ['--headless=new'] : []),
+        ...extra,                     // 兼容参数放最后，不会被用户自己的 extraArgs 顶掉
+        'about:blank',
+      ]
+      let launched = false
+      if (settings.launchDetached !== false) {
+        try {
+          const vbs = writeDetachedLauncher(exe, args)
+          const wscriptExe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'wscript.exe')
+          browser.proc = spawn(wscriptExe, [vbs], { stdio: 'ignore', windowsHide: true })
+          browser.proc.on('exit', () => { browser.proc = null })
+          browser.detachedLaunch = true
+          launched = true
+        } catch (e) {
+          console.warn('[dsh-browser-live] 独立启动器不可用，回退自身子进程:', e?.message)
+          browser.detachedLaunch = false
+        }
+      }
+      if (!launched) {
+        browser.proc = spawn(exe, args, { stdio: 'ignore', detached: false })
         browser.proc.on('exit', () => { browser.proc = null })
-        browser.detachedLaunch = true
-        launched = true
-      } catch (e) {
-        console.warn('[dsh-browser-live] 独立启动器不可用，回退自身子进程:', e?.message)
         browser.detachedLaunch = false
       }
-    }
-    if (!launched) {
-      browser.proc = spawn(exe, args, { stdio: 'ignore', detached: false })
-      browser.proc.on('exit', () => { browser.proc = null })
-      browser.detachedLaunch = false
-    }
-    // 等 CDP：VBS 启动器自己会立刻退出（不代表浏览器没起），所以这里只能按时间等。
-    let ws = null
-    for (let i = 0; i < 40; i++) {
-      await sleep(250)
-      ws = await probePort(port)
-      if (ws) break
-    }
-    if (!ws) {
+      // 等 CDP：VBS 启动器自己会立刻退出（不代表浏览器没起），所以这里只能按时间等。
+      let ws = null
+      for (let i = 0; i < 40; i++) {
+        await sleep(250)
+        ws = await probePort(port)
+        if (ws) break
+      }
+      if (ws) {
+        browser.port = port
+        const compat = { ...(readState().compat || {}) }
+        if (extra.length) compat[label] = extra; else delete compat[label]
+        writeState({ port, compat })
+        await attachCdp(ws)
+        console.log(`[dsh-browser-live] 浏览器已启动（${label} :${port}${browser.detachedLaunch ? ' · 独立进程（有独立窗口）' : ' · 宿主子进程'}${extra.length ? ' · 兼容参数 ' + extra.join(' ') : ''}）`)
+        if (failures.length) noteAction(`⚠ ${failures.join('；')}，已自动改用 ${label}`)
+        if (extra.length) noteAction(`🩹 ${label} 需要兼容参数才能启动：${extra.join(' ')}（通常是安全软件拦了 GPU 进程沙箱）。已记住，下次直接用`)
+        // 让窗口可见性变成"可观测事实"，而不是靠用户反馈
+        reportWindowState(port).then((msg) => noteAction('🪟 ' + msg)).catch(() => {})
+        return
+      }
       try { if (browser.proc) browser.proc.kill() } catch { /* 已经退了 */ }
       browser.proc = null
-      failures.push(label + '：10 秒内没响应 CDP 端口')
-      console.warn(`[dsh-browser-live] ${label} 起不来，换下一个候选`)
-      continue
+      failures.push(label + (extra.length ? `（含 ${extra.join(' ')}）` : '') + '：10 秒内没响应 CDP 端口')
+      console.warn(`[dsh-browser-live] ${label}${extra.length ? '（兼容参数）' : ''} 起不来`)
     }
-    browser.port = port
-    writeFileSync(STATE_FILE(), JSON.stringify({ port }), 'utf8')
-    await attachCdp(ws)
-    console.log(`[dsh-browser-live] 浏览器已启动（${label} :${port}${browser.detachedLaunch ? ' · 独立进程（有独立窗口）' : ' · 宿主子进程'}）`)
-    if (failures.length) noteAction(`⚠ ${failures.join('；')}，已自动改用 ${label}`)
-    // 让窗口可见性变成"可观测事实"，而不是靠用户反馈
-    reportWindowState(port).then((msg) => noteAction('🪟 ' + msg)).catch(() => {})
-    return
   }
   throw new Error('没有浏览器能起来：' + failures.join('；')
-    + '。若日志显示 Chrome 是"起来又立刻退出"，最常见的原因是 **DSH Desktop 以管理员身份运行**：'
-    + 'Chrome 拒绝在提权父进程下初始化沙箱而静默退出（Edge 不受影响）。'
-    + '解法：让 DSH 以普通权限启动，或在设置里把 chromePath 指向 Edge 等其它 Chromium。')
+    + '。常见原因两种：① 安全软件拦掉 Chrome **GPU 进程**的沙箱初始化（本机实测是火绒 HipsDaemon，'
+    + '表现是"起来又立刻静默退出"）—— 插件已自动补试 --in-process-gpu（渲染器沙箱仍保留），'
+    + '仍失败就把 chromePath 指向 Edge 等其它 Chromium；② 机器上没有可用的 Chromium 系浏览器。')
 }
 
 async function shutdown(kill, only) {
@@ -941,7 +973,25 @@ async function attachTab(tab, s0, intendedUrl) {
   if (intendedUrl && isUserKind(s.kind)) params.intendedUrl = String(intendedUrl)
   const att = await s.cdp.send('Target.attachToTarget', params)
   const sessionId = prefixSid(s, att && att.sessionId)
-  tab.sessionId = sessionId
+  // 用户浏览器档在"当前页未授权、目标页已授权"时，扩展会**新开一个标签页**（不动你正在看的页面），
+  // 附加到的是那个新标签页 —— 扩展把真实 tabId 一起报回来，这里据此纠正映射。
+  // 不纠正的话：列表显示"旧标签页已附加"，而 agent 的截图/点击落在另一个标签页上，排查起来极难。
+  let target = tab
+  const realTabId = att && att.tabId != null ? String(att.tabId) : String(tab.targetId)
+  if (realTabId !== String(tab.targetId)) {
+    await refreshTabs(s).catch(() => {})
+    const moved = s.tabs.find((t) => String(t.targetId) === realTabId)
+    if (moved) {
+      tab.sessionId = null
+      target = moved
+      s.selected = moved.targetId
+      if (browser.session === s) viewOf(s)
+    } else {
+      // 新标签页还没出现在列表里（时序）——至少别把会话挂到旧标签页上
+      tab.sessionId = null
+    }
+  }
+  target.sessionId = sessionId
   // 注意：事件监听挂在**本会话自己的传输**上，且闭包持有本会话的 sessionId —— 这样
   // Chrome 与 Edge 同时在用时，事件不会串到另一个浏览器去。
   const cdp = s.cdp
@@ -953,7 +1003,7 @@ async function attachTab(tab, s0, intendedUrl) {
   cdp.on('Page.javascriptDialogOpening', (p) => {
     if (p.sessionId === sessionId) noteAction(`⚠ ${kindLabel(s.kind)} 页面弹出对话框：` + (p.message || p.type))
   })
-  return tab
+  return target
 }
 
 async function selectedTab(s0, intendedUrl) {

@@ -201,6 +201,12 @@ section('B. mock chrome：真加载 background.js，端到端跑新增弹窗动�
       query: async () => TABS.map((t) => ({ ...t })),
       get: async (id) => { const t = TABS.find((x) => x.id === id); if (!t) throw new Error('no tab'); return { ...t } },
       update: async () => ({}),
+      // v0.8.3：未授权页 + 已授权目标站时扩展走"新开标签页"，所以替身要真能加标签页
+      create: async (props) => {
+        const t = { id: 900 + TABS.length, url: (props && props.url) || 'about:blank', title: '新标签页', active: true, windowId: 1 }
+        TABS.push(t)
+        return { ...t }
+      },
       onRemoved: { addListener: (f) => listeners.tabRemoved.push(f) },
     },
     windows: { get: async (id) => ({ id, focused: true }), update: async () => ({}) },
@@ -271,37 +277,52 @@ section('B. mock chrome：真加载 background.js，端到端跑新增弹窗动�
   ok(/^bl-21-\d+$/.test(attOk.sessionId), 'allowAll 打开时 attach 仍成功，且内部 sessionId 无前缀', attOk.sessionId)
   ok(!String(attOk.sessionId).includes(':'), 'handleCommand 返回给内部调用方的 sessionId 是无前缀的（前缀只在 onCommand 出口加）')
 
-  // ---- v0.8.1：当前页未授权 + 目标站已授权 → 扩展**先导航、再附加**。
-  // 替身不记录 tabs.update / debugger.attach，这里临时包一层来观测**顺序** ——
-  // 顺序正是这条改动的要害：attach 必须在导航之后，agent 才拿不到未授权页面的调试器。
+  // ---- v0.8.1/v0.8.3：当前页未授权 + 目标站已授权 → 扩展**新开标签页**过去、附加到新标签页。
+  // 替身不记录 tabs.update / tabs.create / debugger.attach，这里临时包一层来观测**顺序与对象** ——
+  // 这两点正是这条改动的要害：① attach 必须在"页面已经是已授权站点"之后；
+  // ② 你正在看的那个标签页必须**一个字都不动**（v0.8.1 的就地导航会把它顶掉，v0.8.3 改成新开）。
   {
     const nav = []
     const realUpdate = globalThis.chrome.tabs.update
     const realAttach = globalThis.chrome.debugger.attach
+    const realCreate = globalThis.chrome.tabs.create
     globalThis.chrome.tabs.update = async (id, props) => {
-      nav.push('update:' + ((props && props.url) || ''))
+      nav.push('update:' + id + ':' + ((props && props.url) || ''))
       const t = TABS.find((x) => x.id === id)
-      if (t && props && props.url) t.url = props.url          // 模拟真导航：URL 真的变了
+      if (t && props && props.url) t.url = props.url
       return {}
+    }
+    globalThis.chrome.tabs.create = async (props) => {
+      nav.push('create:' + ((props && props.url) || ''))
+      // 必须真的把新标签页加进 TABS：扩展接下来会 chrome.tabs.get(新 id) 等它落到已授权 origin
+      const t = { id: 900 + TABS.length, url: (props && props.url) || 'about:blank', title: '新标签页', active: true, windowId: 1 }
+      TABS.push(t)
+      return { ...t }
     }
     globalThis.chrome.debugger.attach = async (targetOrId) => {
       nav.push('attach:' + (targetOrId && targetOrId.tabId !== undefined ? targetOrId.tabId : targetOrId))
     }
     await P.save({ origins: ['https://a.test'], allowAll: false, allowInput: false, autoConnect: false })
+    const before22 = TABS.find((x) => x.id === 22).url
 
-    // A. 前台页是 b.test（未授权）、目标是已授权的 a.test → 先导航过去再附加
+    // A. 前台页是 b.test（未授权）、目标是已授权的 a.test → 新开标签页再附加
     const st = await bgMod.handleCommand({ method: 'Target.attachToTarget', params: { targetId: '22', intendedUrl: 'https://a.test/landing' } })
-    ok(/^bl-22-\d+$/.test(String(st.sessionId)) && nav.join(' → ') === 'update:https://a.test/landing → attach:22',
-      '未授权页 + 已授权目标站：先导航、再附加（顺序不能反）', JSON.stringify({ st, nav }))
+    ok(nav[0] === 'create:https://a.test/landing' && nav[1] === 'attach:' + st.tabId,
+      '未授权页 + 已授权目标站：新开标签页 → 附加到**新**标签页（顺序与对象都对）', JSON.stringify({ st, nav }))
+    ok(String(st.tabId) !== '22' && /^bl-\d+-\d+$/.test(String(st.sessionId)),
+      '附加的是新标签页，且 handleCommand 把真实 tabId 报给 host（host 才能纠正映射）', st)
+    ok(TABS.find((x) => x.id === 22).url === before22 && !nav.some((x) => x.startsWith('update:')),
+      '你正在看的那个标签页一个字都没动（这就是"不动你的页面"）', { before: before22, nav })
     await bgMod.__internals.detachSession(st.sessionId)
 
-    // B. 目标站也没授权 → 仍然拒绝，且**不产生任何导航**（隐私底线不变）
+    // B. 目标站也没授权 → 仍然拒绝，且既不新开也不导航（隐私底线不变）
     nav.length = 0
     let e2 = ''
     try { await bgMod.handleCommand({ method: 'Target.attachToTarget', params: { targetId: '24', intendedUrl: 'https://d.test/never' } }) } catch (e) { e2 = e.message }
-    ok(/未授权/.test(e2) && nav.length === 0, '目标站也未授权：仍然拒绝，且一步都不导航', JSON.stringify({ e2, nav }))
+    ok(/未授权/.test(e2) && nav.length === 0, '目标站也未授权：仍然拒绝，既不新开标签页也不导航', JSON.stringify({ e2, nav }))
 
     globalThis.chrome.tabs.update = realUpdate
+    globalThis.chrome.tabs.create = realCreate
     globalThis.chrome.debugger.attach = realAttach
   }
   await bgMod.disconnect()

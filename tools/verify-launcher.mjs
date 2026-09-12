@@ -63,5 +63,22 @@ console.log('\nB. 候选浏览器列表与顺序')
   rmSync(dir, { recursive: true, force: true })
 }
 
+console.log('\nC. 起不来时的兼容参数：守住"不拿关沙箱当默认解法"这条底线')
+{
+  const flags = mod.COMPAT_FLAGS
+  eq(flags.join(' '), '--in-process-gpu', '兼容参数是 --in-process-gpu（GPU 跑在浏览器进程里，渲染器沙箱仍保留）')
+  ok(!JSON.stringify(flags).includes('--no-sandbox'),
+    '兼容参数里**绝不能**出现 --no-sandbox —— 那是把整个沙箱关掉，拿它当 agent 浏览器的默认解法代价太大')
+  // 记忆用假浏览器名，别污染真实状态文件里 chrome.exe / msedge.exe 的记录
+  eq(mod.compatFlagsFor('C:/whatever/probe-fake.exe').length, 0, '没记录过 → 不返回任何兼容参数')
+  mod.writeState({ compat: { ...(mod.readState().compat || {}), 'probe-fake.exe': ['--in-process-gpu'] } })
+  eq(mod.compatFlagsFor('D:/other/dir/probe-fake.exe').join(' '), '--in-process-gpu',
+    '记录过 → 换个目录也认（按 exe 文件名匹配），下次直接用它、不必先失败 10 秒')
+  const c = { ...(mod.readState().compat || {}) }
+  delete c['probe-fake.exe']
+  mod.writeState({ compat: c })
+  eq(mod.compatFlagsFor('C:/whatever/probe-fake.exe').length, 0, '清掉记录后不再返回')
+}
+
 console.log(`\n${fail ? '✗' : '✓'} verify-launcher: ${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)
