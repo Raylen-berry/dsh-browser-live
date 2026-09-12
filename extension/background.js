@@ -43,18 +43,22 @@ const INPUT_METHODS = new Set([
 const isInputMethod = (m) => INPUT_METHODS.has(m) || m.startsWith('Input.')
 
 // 永远拒绝：改浏览器/标签页结构、网络与模拟器
+// 注意 Target.closeTarget **不在这里** —— 它走 handleCommand 里单独的分支：
+// 只允许关 agent 自己开的标签页（见 state.ownedTabs），你手动开的页面一律拒绝。
 const DENIED_PREFIX = ['Emulation.', 'Network.setExtraHTTPHeaders', 'Page.setDownloadBehavior',
   'Browser.setDownloadBehavior', 'DOM.setAttributeValue', 'Target.createTarget',
-  'Target.closeTarget', 'Target.activateTarget', 'Page.close', 'Page.bringToFront', 'Runtime.addBinding']
+  'Target.activateTarget', 'Page.close', 'Page.bringToFront', 'Runtime.addBinding']
 
 const DENIED_HINT = {
   'Target.createTarget': '暂不允许新建标签页；请自己在浏览器里开好页面（或让 agent 导航当前页）',
-  'Target.closeTarget': '暂不允许关闭你的标签页',
 }
 
 // ---- 状态 ------------------------------------------------------------------
 const state = {
-  cfg: { port: 9760, token: '', autoConnect: true, allowAll: false, allowInput: false, origins: [] },
+  cfg: { port: 9760, token: '', autoConnect: true, allowAll: false, allowInput: false, allowCloseOwn: true, origins: [] },
+  // agent **自己**开出来的标签页（新开标签页去已授权站点时记下）。关标签页只放行这些，
+  // 你手动开的页面永远不会被关 —— 这是"允许关自己开的页"与"不碰你的页"的分界线。
+  ownedTabs: new Set(),
   ws: null,
   connected: false,
   hostVersion: '',
@@ -82,12 +86,13 @@ function note(msg) {
 // ---- 配置持久化 -------------------------------------------------------------
 async function loadCfg() {
   try {
-    const raw = await chrome.storage.local.get(['port', 'token', 'autoConnect', 'allowAll', 'allowInput', 'origins'])
+    const raw = await chrome.storage.local.get(['port', 'token', 'autoConnect', 'allowAll', 'allowInput', 'allowCloseOwn', 'origins'])
     state.cfg.port = Number.isFinite(raw.port) ? raw.port : 9760
     state.cfg.token = typeof raw.token === 'string' ? raw.token : ''
     state.cfg.autoConnect = raw.autoConnect !== false
     state.cfg.allowAll = raw.allowAll === true
     state.cfg.allowInput = raw.allowInput === true
+    state.cfg.allowCloseOwn = raw.allowCloseOwn !== false
     state.cfg.origins = Array.isArray(raw.origins) ? raw.origins.filter((x) => typeof x === 'string') : []
   } catch { /* 首用默认 */ }
   return state.cfg
@@ -97,11 +102,12 @@ async function saveCfg(patch) {
   try {
     await chrome.storage.local.set({
       port: state.cfg.port, token: state.cfg.token, autoConnect: state.cfg.autoConnect,
-      allowAll: state.cfg.allowAll, allowInput: state.cfg.allowInput, origins: state.cfg.origins,
+      allowAll: state.cfg.allowAll, allowInput: state.cfg.allowInput, allowCloseOwn: state.cfg.allowCloseOwn,
+      origins: state.cfg.origins,
     })
   } catch { /* ignore */ }
   // 授权/开关一变就同步给 host：/bl/state 里直接能看到，省得用户复述
-  sendToHost({ type: 'config', origins: state.cfg.origins, allowAll: state.cfg.allowAll, allowInput: state.cfg.allowInput })
+  sendToHost({ type: 'config', origins: state.cfg.origins, allowAll: state.cfg.allowAll, allowInput: state.cfg.allowInput, allowCloseOwn: state.cfg.allowCloseOwn })
   return state.cfg
 }
 
@@ -151,6 +157,7 @@ async function attachTab(tabId0, intendedUrl) {
     const created = await chrome.tabs.create({ url: want, active: true }).catch(() => null)
     if (!created || created.id === undefined) throw new Error('浏览器拒绝了新开标签页（tabs.create 失败）')
     tabId = created.id
+    state.ownedTabs.add(tabId)                 // 这是 agent 自己开的页：以后允许它自己关掉
     for (let i = 0; i < 50; i++) {           // 最多等 5s 落到已授权 origin
       await sleep(100)
       tab = await chrome.tabs.get(tabId).catch(() => null)
@@ -244,6 +251,24 @@ export async function handleCommand({ method, params = {}, sessionId }) {
   // 入口边界：host 下发的 sessionId 带 `<kind>:` 前缀（例：chrome:bl-12-1），
   // chrome.debugger 只认无前缀值。这里剥一次，往下全用无前缀 sid。
   const sid = raw(sessionId)
+  // 关标签页：只放行 **agent 自己开的** 那些（新开标签页去已授权站点时记进 state.ownedTabs）。
+  // 分界线很清楚：agent 开的页，agent 自己收拾；你手动开的页面，任何情况下都不动。
+  // 弹窗里的「允许关闭 agent 自己开的页面」关掉之后，连自己开的也不许关（P0 只读优先）。
+  if (method === 'Target.closeTarget') {
+    const id = Number(params.targetId)
+    if (!Number.isInteger(id)) throw new Error('targetId 非法')
+    if (state.cfg.allowCloseOwn !== true) {
+      throw new Error('已拒绝：关闭标签页需要你在扩展弹窗里打开「允许关闭 agent 自己开的页面」')
+    }
+    if (!state.ownedTabs.has(id)) {
+      throw new Error('已拒绝：只能关闭 agent 自己打开的标签页（你手动开的页面不会被关）')
+    }
+    await chrome.tabs.remove(id).catch(() => { throw new Error('关闭标签页失败（可能已经被关掉了）') })
+    state.ownedTabs.delete(id)
+    state.byTab.delete(id)
+    note(`已关闭 agent 自己打开的标签页 #${id}`)
+    return { success: true }
+  }
   const allowedNow = ALLOWED.has(method) || (isInputMethod(method) && state.cfg.allowInput === true)
   if (!allowedNow) throw new Error(deniedReason(method))
 
@@ -304,6 +329,8 @@ export function status() {
     lastError: state.lastError,
     allowAll: state.cfg.allowAll,
     allowInput: state.cfg.allowInput,
+    allowCloseOwn: state.cfg.allowCloseOwn,
+    ownedTabs: [...state.ownedTabs],     // agent 自己开的标签页（只有这些页允许被关）
     origins: [...state.cfg.origins],
     autoConnect: state.cfg.autoConnect,
     protocol: PROTOCOL,
@@ -328,7 +355,7 @@ export async function connect() {
   const isCurrent = () => state.ws === ws
   ws.onopen = () => {
     if (!isCurrent()) return
-    sendToHost({ type: 'hello', protocol: PROTOCOL, token: state.cfg.token, version: chrome.runtime.getManifest().version, browser: KIND, origins: state.cfg.origins, allowAll: state.cfg.allowAll, allowInput: state.cfg.allowInput })
+    sendToHost({ type: 'hello', protocol: PROTOCOL, token: state.cfg.token, version: chrome.runtime.getManifest().version, browser: KIND, origins: state.cfg.origins, allowAll: state.cfg.allowAll, allowInput: state.cfg.allowInput, allowCloseOwn: state.cfg.allowCloseOwn })
     startPing()
   }
   ws.onmessage = (ev) => {
@@ -476,6 +503,12 @@ const POPUP_API = {
     note(flag ? '⚠ 已开启「允许操作」：agent 可以真点击/打字' : '已关闭「允许操作」')
     return status()
   },
+  /** 允许 agent 关闭**它自己开的**标签页（你手动开的页面永远不在这个范围内）。 */
+  async setCloseOwn(flag) {
+    await saveCfg({ allowCloseOwn: !!flag })
+    note(flag ? '已允许 agent 关闭它自己打开的标签页' : '已关闭：agent 连自己打开的标签页也不能关')
+    return status()
+  },
 }
 
 export function boot() {
@@ -500,6 +533,7 @@ export function boot() {
     note(`调试器被移除：${reason}`)
   })
   chrome.tabs.onRemoved.addListener((tabId) => {
+    state.ownedTabs.delete(tabId)                     // 页没了就别再记着它（自己关的、或被别人关的都一样）
     const sessionId = state.byTab.get(tabId)          // 无前缀
     if (!sessionId) return
     state.sessions.delete(sessionId)

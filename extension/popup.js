@@ -65,6 +65,7 @@ async function refresh() {
     $('auto').checked = !!st.autoConnect
     $('allowAll').checked = !!st.allowAll
     $('allowInput').checked = !!st.allowInput
+    $('allowCloseOwn').checked = st.allowCloseOwn !== false
 
     const origins = st.origins || []
     $('granted').textContent = (st.allowAll
@@ -112,6 +113,14 @@ $('allowInput').addEventListener('change', async () => {
   refresh()
 })
 $('detachAll').addEventListener('click', async () => { await api('detachAll'); setFlash('已断开所有标签页'); refresh() })
+$('allowCloseOwn').addEventListener('change', async () => {
+  const on = $('allowCloseOwn').checked
+  const r = await api('setCloseOwn', on)
+  setFlash(r.ok
+    ? (on ? '已允许 agent 关闭它自己打开的标签页（你手动开的页面仍然不会被关）' : '已关闭：agent 连自己打开的标签页也不能关')
+    : ('失败：' + (r.error || '')), !r.ok)
+  refresh()
+})
 // 允许当前所有标签页：只并入 origins，不打开 allowAll（新增站点以后仍要单独点「允许」）
 $('allowAllTabs').addEventListener('click', async () => {
   const r = await api('allowTabs')

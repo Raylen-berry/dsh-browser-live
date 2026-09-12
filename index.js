@@ -947,9 +947,10 @@ async function waitTargetGone(targetId, tries = 12, s0) {
   // Target.closeTarget 是异步生效的：轮询确认它真的从 getTargets 消失，避免"刚关完就列表"竞态
   for (let i = 0; i < tries; i++) {
     await refreshTabs(s)
-    if (!s.tabs.some((t) => t.targetId === targetId)) return
+    if (!s.tabs.some((t) => t.targetId === targetId)) return true    // 真的关掉了
     await sleep(120)
   }
+  return false                                                       // 还在 —— 说明被拒绝或没生效
 }
 
 /** 会话 id 归一：用户浏览器的 sessionId 一律带 `<kind>:` 前缀。
@@ -1703,7 +1704,16 @@ function buildTools(t) {
       if (!Number.isInteger(idx) || idx < 0 || idx >= browser.tabs.length) return { ok: false, error: 'index 越界', tabs: view() }
       const tab = browser.tabs[idx]
       if (act === 'select') { browser.selected = tab.targetId; await attachTab(tab); await refreshTabs(); return { ok: true, tabs: view() } }
-      if (act === 'close') { await browser.cdp.send('Target.closeTarget', { targetId: tab.targetId }).catch(() => {}); if (browser.selected === tab.targetId) browser.selected = null; await waitTargetGone(tab.targetId); return { ok: true, tabs: view() } }
+      if (act === 'close') {
+        // v0.8.5：错误不再吞掉。用户浏览器档只允许关"agent 自己开的"标签页，
+        // 被扩展拒绝时必须让人看见原因 —— 原来 .catch(()=>{}) 会返回 ok:true，看着像关成功了。
+        let err = null
+        try { await browser.cdp.send('Target.closeTarget', { targetId: tab.targetId }) } catch (e) { err = e }
+        if (browser.selected === tab.targetId) browser.selected = null
+        const gone = await waitTargetGone(tab.targetId)
+        if (!gone) throw new Error('关闭标签页失败：' + String((err && err.message) || '标签页没有被关掉（多半是被扩展拒绝了：只能关 agent 自己打开的标签页，或弹窗里那个开关关着）'))
+        return { ok: true, tabs: view() }
+      }
       throw new Error('未知 action: ' + act)
     },
   }))
@@ -2243,7 +2253,15 @@ export async function apply(ctx, config) {
             const tab = browser.tabs[idx]
             if (!tab) throw new Error('index 越界')
             if (body.action === 'select') { browser.selected = tab.targetId; await attachTab(tab); await refreshTabs() }
-            else if (body.action === 'close') { await browser.cdp.send('Target.closeTarget', { targetId: tab.targetId }).catch(() => {}); if (browser.selected === tab.targetId) browser.selected = null; await waitTargetGone(tab.targetId) }
+            else if (body.action === 'close') {
+              // 与 browser_tabs 的 close 同一条路径：不吞错误，关不掉就说清楚为什么（面板里也看得到）
+              let err = null
+              try { await browser.cdp.send('Target.closeTarget', { targetId: tab.targetId }) } catch (e) { err = e }
+              if (browser.selected === tab.targetId) browser.selected = null
+              if (!(await waitTargetGone(tab.targetId))) {
+                throw new Error('关闭标签页失败：' + String((err && err.message) || '标签页没有被关掉（多半是被扩展拒绝了）'))
+              }
+            }
             else throw new Error('未知 action')
           })
           noteAction('🖱 用户面板操作标签页: ' + body.action + ' #' + body.index)

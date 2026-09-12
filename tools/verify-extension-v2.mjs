@@ -208,6 +208,13 @@ section('B. mock chrome：真加载 background.js，端到端跑新增弹窗动�
         return { ...t }
       },
       onRemoved: { addListener: (f) => listeners.tabRemoved.push(f) },
+      // v0.8.5：关标签页只放行 agent 自己开的页，替身要真能删并触发 onRemoved
+      remove: async (id) => {
+        const i = TABS.findIndex((x) => x.id === id)
+        if (i < 0) throw new Error('no tab')
+        TABS.splice(i, 1)
+        listeners.tabRemoved.forEach((f) => f(id))
+      },
     },
     windows: { get: async (id) => ({ id, focused: true }), update: async () => ({}) },
     debugger: {
@@ -335,6 +342,30 @@ section('B. mock chrome：真加载 background.js，端到端跑新增弹窗动�
     ok(TABS.find((x) => x.id === 24).url === 'https://c.test:8443/w',
       '那个已附着的未授权页也没被导航（你正在看的页面不该被改写）', TABS.find((x) => x.id === 24).url)
     await bgMod.__internals.detachSession(cNew.sessionId)
+
+    // D. 关标签页：只放行 **agent 自己开的** 页；你手动开的页永远拒；
+    //    弹窗开关（默认开）关掉之后连自己开的也拒。
+    let eOwn = ''
+    try { await bgMod.handleCommand({ method: 'Target.closeTarget', params: { targetId: '22' } }) } catch (e) { eOwn = e.message }
+    ok(/只能关闭 agent 自己打开的标签页/.test(eOwn), '拒绝关闭你手动开的标签页 #22', eOwn)
+
+    const ownedId = String(cNew.tabId)          // C 段里新开的那张就是 agent 自己的页
+    const dClose = await bgMod.handleCommand({ method: 'Target.closeTarget', params: { targetId: ownedId } })
+    ok(dClose && dClose.success === true && !TABS.some((t) => String(t.id) === ownedId),
+      'agent 自己开的标签页可以关掉，且真的从列表消失', JSON.stringify({ dClose, ids: TABS.map((t) => t.id) }))
+    ok(!bgMod.__internals.state.ownedTabs.has(Number(ownedId)),
+      '关掉之后 ownedTabs 里也清掉了（onRemoved 收尾）', [...bgMod.__internals.state.ownedTabs])
+
+    const offStatus = await bgMod.__internals.POPUP_API.setCloseOwn(false)
+    ok(offStatus && offStatus.allowCloseOwn === false, '弹窗开关 setCloseOwn(false) 生效并回读为 false', offStatus && offStatus.allowCloseOwn)
+    const again = await bgMod.handleCommand({ method: 'Target.attachToTarget', params: { targetId: '24', intendedUrl: 'https://a.test/again' } })
+    ok(again && bgMod.__internals.state.ownedTabs.has(Number(again.tabId)), '又开了一张自己的页（记进 ownedTabs）', [...bgMod.__internals.state.ownedTabs])
+    let eOff = ''
+    try { await bgMod.handleCommand({ method: 'Target.closeTarget', params: { targetId: String(again.tabId) } }) } catch (e) { eOff = e.message }
+    ok(/弹窗里打开/.test(eOff), '开关关掉后：连自己开的页也不许关', eOff)
+    await bgMod.__internals.POPUP_API.setCloseOwn(true)
+    const dBack = await bgMod.handleCommand({ method: 'Target.closeTarget', params: { targetId: String(again.tabId) } })
+    ok(dBack && dBack.success === true, '开关重新打开后：自己开的页又能关了（收尾）', dBack)
 
     globalThis.chrome.tabs.update = realUpdate
     globalThis.chrome.tabs.create = realCreate

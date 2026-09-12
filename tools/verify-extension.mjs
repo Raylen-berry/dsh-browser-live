@@ -205,7 +205,12 @@ await denied('Input.dispatchKeyEvent', { type: 'keyDown' }, 'Input.dispatchKeyEv
 await denied('Input.insertText', { text: 'hi' }, 'Input.insertText 被拒', /允许操作/)
 await denied('DOM.setFileInputFiles', { files: ['C:\\x'] }, 'DOM.setFileInputFiles 被拒', /允许操作/)
 await denied('Target.createTarget', { url: 'https://x.test' }, 'Target.createTarget 仍被拒', /不允许新建/)
-await denied('Target.closeTarget', { targetId: '12' }, 'Target.closeTarget 仍被拒', /不允许关闭/)
+await denied('Target.closeTarget', { targetId: '12' }, 'Target.closeTarget：不是 agent 开的页 → 拒绝', /只能关闭 agent 自己打开的标签页/)
+// 关标签页是**有条件的白名单**：只放行 agent 自己开的页（见 verify-extension-v2 的 D 段测放行）。
+// 弹窗开关关掉之后，连自己开的也不许关 —— P0 只读优先。
+await ext.__internals.POPUP_API.setCloseOwn(false)
+await denied('Target.closeTarget', { targetId: '12' }, '「允许关闭 agent 自己开的页」关掉后：一律拒', /弹窗里打开/)
+await ext.__internals.POPUP_API.setCloseOwn(true)
 await denied('Network.enable', {}, '白名单外方法一律拒', /白名单/)
 await denied('Page.navigate', { url: 'javascript:alert(1)' }, 'javascript: 导航被拒', /http/)
 await denied('Page.navigate', { url: 'file:///C:/secret.txt' }, 'file: 导航被拒', /http/)
