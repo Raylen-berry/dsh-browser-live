@@ -154,7 +154,12 @@ function callRoute(path_, opts = {}) {
 }
 
 // ---------------------------------------------------------------- 注册面
-ok(tools.size === 17, '17 个 browser_* 工具已注册', String(tools.size))
+ok(tools.size === 18, '18 个 browser_* 工具已注册', String(tools.size))
+ok(tools.has('browser_ext_setup'), 'browser_ext_setup 已注册（一键备好接管日常浏览器的现场）')
+// 非法 kind 必须在"动 UI/开桥"之前就被拒绝：这条用例的价值就在于它不产生任何副作用。
+// （桩把工具返回值 JSON.stringify 成字符串，所以要 parse 回来再断言。）
+const extBad = JSON.parse(String(await tools.get('browser_ext_setup').execute({ kind: 'firefox' })))
+ok(extBad && extBad.ok === false && /edge/.test(extBad.error || ''), 'browser_ext_setup 拒绝非法 kind 且不产生副作用', JSON.stringify(extBad))
 ok(routes.has('/bl/bridge'), '/bl/bridge 路由已注册')
 ok(!existsSync(path.join(home, 'dsh-browser-live', 'bridge.json')), 'userBridge=false 时不起桥（不写 bridge.json）')
 const st0 = (await callRoute('/bl/state')).json
