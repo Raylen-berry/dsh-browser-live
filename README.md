@@ -246,6 +246,17 @@ host(index.js) ──WS──> 扩展（extension/, MV3，Chrome 和 Edge 各装
 
 ## 版本与变更记录
 
+- **v0.8.2**：**「Chrome 起不来 = 整个插件不可用」＋「中文用户名下浏览器根本拉不起来」** ——
+  启动链上两个只在真实机器暴露的坑。① VBS 独立启动器原来用 UTF-8 写、wscript 按 ANSI 读，
+  中文用户名（`C:\Users\陈道云\…`）被读成乱码路径 → 浏览器一个进程都不起，对外只报「未响应 CDP 端口」，
+  还在 `C:\Users` 下留下乱码目录；现在写 **UTF-16LE + BOM**。
+  ② 首选浏览器起不来时不再全盘失败：`findChromiumExes()` 返回候选列表
+  （`chromePath` → 环境变量 → Chrome → Edge → Brave）逐个尝试并**自动降级**。
+  这条是实测逼出来的：**DSH Desktop 以管理员身份运行时，Chrome 会因无法在提权父进程下初始化沙箱
+  而静默退出（加 `--no-sandbox` 才起，但默认不关沙箱），Edge 不受影响** —— 也就是说"装了个 Chrome"
+  反而可能让插件彻底不可用。同时：端口改成跳过"已有别的 CDP 在听"的（避免附加到错误的浏览器），
+  每个浏览器各自一个 profile 目录（`chrome-profile-chrome` / `-msedge` / …）。
+  新增回归测试 `tools/verify-launcher.mjs`（10 条）。
 - **v0.8.1**：**「我允许了目标站点，你却还在报未授权」** —— 用户浏览器档的判权用的是标签页**当前** URL，
   于是"允许了 github.com、前台却开着别的页"这种最常见用法必然被闸死。
   现在 `browser_open {use:"edge", url}` / `browser_navigate {url}` 会把目标 URL 传进 `Target.attachToTarget`

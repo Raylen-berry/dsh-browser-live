@@ -89,7 +89,7 @@ function dshHome() {
 const BASE_DIR = () => path.join(dshHome(), 'dsh-browser-live')
 const SETTINGS_FILE = () => path.join(BASE_DIR(), 'settings.json')
 const STATE_FILE = () => path.join(BASE_DIR(), 'state.json')
-const CHROME_PROFILE = () => path.join(BASE_DIR(), 'chrome-profile')
+const CHROME_PROFILE = (exe) => path.join(BASE_DIR(), 'chrome-profile' + (exe ? '-' + path.basename(exe, path.extname(exe)) : ''))
 const DOWNLOADS_DIR = () => path.join(BASE_DIR(), 'downloads')
 const SHOTS_DIR = () => path.join(BASE_DIR(), 'shots')
 
@@ -566,24 +566,32 @@ async function probePort(port) {
   return r && r.json && r.json.webSocketDebuggerUrl ? r.json.webSocketDebuggerUrl : null
 }
 
-function findChrome() {
-  const tries = []
-  if (settings.chromePath) tries.push(settings.chromePath)
-  if (process.env.DSH_BROWSER_LIVE_CHROME) tries.push(process.env.DSH_BROWSER_LIVE_CHROME)
+/**
+ * 所有可用的 Chromium 系浏览器，按偏好排序：设置里的 chromePath → 环境变量 → Chrome → Edge → Brave。
+ * 之所以是**列表**而不是"第一个能用的"：某台机器上首选浏览器可能根本起不来
+ * （实测：DSH Desktop 以管理员身份运行时，Chrome 会因无法初始化沙箱而静默退出，Edge 不受影响），
+ * 那时候应该自动退到下一个，而不是让整个插件不可用。
+ */
+export function findChromiumExes() {
+  const found = []
+  const add = (p) => { try { if (p && existsSync(p) && !found.includes(p)) found.push(p) } catch { /* ignore */ } }
+  add(settings.chromePath)
+  add(process.env.DSH_BROWSER_LIVE_CHROME)
   const pf = process.env['ProgramFiles'] || 'C:\\Program Files'
   const pf86 = process.env['ProgramFiles (x86)'] || 'C:\\Program Files (x86)'
   const lad = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local')
-  tries.push(
-    path.join(pf, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-    path.join(pf86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-    path.join(lad, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-    path.join(pf, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
-    path.join(pf86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
-    path.join(pf, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'),
-    path.join(lad, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'),
-  )
-  for (const t of tries) { try { if (t && existsSync(t)) return t } catch {} }
-  return null
+  add(path.join(pf, 'Google', 'Chrome', 'Application', 'chrome.exe'))
+  add(path.join(pf86, 'Google', 'Chrome', 'Application', 'chrome.exe'))
+  add(path.join(lad, 'Google', 'Chrome', 'Application', 'chrome.exe'))
+  add(path.join(pf, 'Microsoft', 'Edge', 'Application', 'msedge.exe'))
+  add(path.join(pf86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'))
+  add(path.join(pf, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'))
+  add(path.join(lad, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'))
+  return found
+}
+
+function findChrome() {
+  return findChromiumExes()[0] || null
 }
 
 /** 本包 extension/ 的绝对路径 —— 装扩展时用户必须选中的那个目录。 */
@@ -676,13 +684,17 @@ export function writeDetachedLauncher(exe, args) {
   const lit = (s) => '"' + String(s).replace(/"/g, '""') + '"'
   const cmd = [lit(exe), ...args.map(lit)].join(' ')
   const body = [
-    "' dsh-browser-live：把 Chrome 拉成独立进程，使其拥有真实窗口（由插件自动生成，可删）",
+    "' dsh-browser-live：把浏览器拉成独立进程，使其拥有真实窗口（由插件自动生成，可删）",
     'Set sh = CreateObject("WScript.Shell")',
     'sh.CurrentDirectory = ' + lit(path.dirname(exe)),
     'sh.Run ' + lit(cmd) + ', 1, False',
     '',
   ].join('\r\n')
-  writeFileSync(vbs, body, 'utf8')
+  // 必须写 **UTF-16LE + BOM**：wscript 默认按 ANSI 代码页读 .vbs，
+  // 而用户名/路径里只要有中文（C:\Users\陈道云\…），UTF-8 写出来的就会被读成
+  // `C:\Users\闄堥亾浜慭\…` —— 那是条不存在的路径，浏览器一个进程都不会起，
+  // 而错误表现只是"未响应 CDP 端口"，极难定位（本机实测踩过，还在 C:\Users 下留下了乱码目录）。
+  writeFileSync(vbs, '\ufeff' + body, 'utf16le')
   return vbs
 }
 
@@ -762,57 +774,84 @@ async function launch() {
     }
   } catch { /* 无状态文件 */ }
 
-  const exe = findChrome()
-  if (!exe) throw new Error('未找到 Chrome/Edge/Brave；在设置里填 chromePath，或装一个 Chromium')
-  const port = 9600 + Math.floor(Math.random() * 300)
-  const args = [
-    `--remote-debugging-port=${port}`,
-    '--remote-allow-origins=*',
-    `--user-data-dir=${CHROME_PROFILE()}`,
-    '--no-first-run', '--no-default-browser-check',
-    '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows',
-    `--window-size=${settings.windowSize}`,
-    // 代理：独立实例也走你指定的出口（http://host:port / socks5://host:port）；留空=跟随系统
-    ...(settings.proxy ? [`--proxy-server=${settings.proxy}`] : []),
-    ...parseExtraArgs(settings.extraArgs),
-    ...(settings.headless ? ['--headless=new'] : []),
-    'about:blank',
-  ]
-  let launched = false
-  if (settings.launchDetached !== false) {
-    try {
-      const vbs = writeDetachedLauncher(exe, args)
-      const wscriptExe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'wscript.exe')
-      browser.proc = spawn(wscriptExe, [vbs], { stdio: 'ignore', windowsHide: true })
+  const exes = findChromiumExes()
+  if (!exes.length) throw new Error('未找到 Chrome/Edge/Brave；在设置里填 chromePath，或装一个 Chromium')
+
+  const failures = []
+  for (const exe of exes) {
+    const label = path.basename(exe)
+    // 选一个**本机没有别的 CDP 在听**的端口：9600~9899 里随机挑也可能正好撞上别的浏览器
+    // （或上次没退干净的实例）的调试端口，那时 probePort 会返回**别人**的 WebSocket，
+    // 插件就附加到错误的那台浏览器上了（本机实测撞到过 Edge 的调试实例）。
+    let port = 0
+    for (let i = 0; i < 24; i++) {
+      const cand = 9600 + Math.floor(Math.random() * 300)
+      if (!(await probePort(cand))) { port = cand; break }
+    }
+    if (!port) { failures.push(label + '：9600~9899 端口全被占用'); continue }
+
+    // 每个浏览器用**各自的** profile 目录：Chrome 与 Edge 共用一个目录会互相改对方的数据。
+    const profile = CHROME_PROFILE(exe)
+    mkdirSync(profile, { recursive: true })
+    const args = [
+      `--remote-debugging-port=${port}`,
+      '--remote-allow-origins=*',
+      `--user-data-dir=${profile}`,
+      '--no-first-run', '--no-default-browser-check',
+      '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows',
+      `--window-size=${settings.windowSize}`,
+      // 代理：独立实例也走你指定的出口（http://host:port / socks5://host:port）；留空=跟随系统
+      ...(settings.proxy ? [`--proxy-server=${settings.proxy}`] : []),
+      ...parseExtraArgs(settings.extraArgs),
+      ...(settings.headless ? ['--headless=new'] : []),
+      'about:blank',
+    ]
+    let launched = false
+    if (settings.launchDetached !== false) {
+      try {
+        const vbs = writeDetachedLauncher(exe, args)
+        const wscriptExe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'wscript.exe')
+        browser.proc = spawn(wscriptExe, [vbs], { stdio: 'ignore', windowsHide: true })
+        browser.proc.on('exit', () => { browser.proc = null })
+        browser.detachedLaunch = true
+        launched = true
+      } catch (e) {
+        console.warn('[dsh-browser-live] 独立启动器不可用，回退自身子进程:', e?.message)
+        browser.detachedLaunch = false
+      }
+    }
+    if (!launched) {
+      browser.proc = spawn(exe, args, { stdio: 'ignore', detached: false })
       browser.proc.on('exit', () => { browser.proc = null })
-      browser.detachedLaunch = true
-      launched = true
-    } catch (e) {
-      console.warn('[dsh-browser-live] 独立启动器不可用，回退自身子进程:', e?.message)
       browser.detachedLaunch = false
     }
+    // 等 CDP：VBS 启动器自己会立刻退出（不代表浏览器没起），所以这里只能按时间等。
+    let ws = null
+    for (let i = 0; i < 40; i++) {
+      await sleep(250)
+      ws = await probePort(port)
+      if (ws) break
+    }
+    if (!ws) {
+      try { if (browser.proc) browser.proc.kill() } catch { /* 已经退了 */ }
+      browser.proc = null
+      failures.push(label + '：10 秒内没响应 CDP 端口')
+      console.warn(`[dsh-browser-live] ${label} 起不来，换下一个候选`)
+      continue
+    }
+    browser.port = port
+    writeFileSync(STATE_FILE(), JSON.stringify({ port }), 'utf8')
+    await attachCdp(ws)
+    console.log(`[dsh-browser-live] 浏览器已启动（${label} :${port}${browser.detachedLaunch ? ' · 独立进程（有独立窗口）' : ' · 宿主子进程'}）`)
+    if (failures.length) noteAction(`⚠ ${failures.join('；')}，已自动改用 ${label}`)
+    // 让窗口可见性变成"可观测事实"，而不是靠用户反馈
+    reportWindowState(port).then((msg) => noteAction('🪟 ' + msg)).catch(() => {})
+    return
   }
-  if (!launched) {
-    browser.proc = spawn(exe, args, { stdio: 'ignore', detached: false })
-    browser.proc.on('exit', () => { browser.proc = null })
-    browser.detachedLaunch = false
-  }
-  let ws = null
-  for (let i = 0; i < 60; i++) {
-    await sleep(250)
-    ws = await probePort(port)
-    if (ws) break
-  }
-  if (!ws) {
-    try { if (browser.proc) browser.proc.kill() } catch {}
-    throw new Error('Chrome 未响应 CDP 端口（可能被安全软件拦截）')
-  }
-  browser.port = port
-  writeFileSync(STATE_FILE(), JSON.stringify({ port }), 'utf8')
-  await attachCdp(ws)
-  console.log(`[dsh-browser-live] 浏览器已启动（${path.basename(exe)} :${port}${browser.detachedLaunch ? ' · 独立进程（有独立窗口）' : ' · 宿主子进程'}）`)
-  // 让窗口可见性变成"可观测事实"，而不是靠用户反馈
-  reportWindowState(port).then((msg) => noteAction('🪟 ' + msg)).catch(() => {})
+  throw new Error('没有浏览器能起来：' + failures.join('；')
+    + '。若日志显示 Chrome 是"起来又立刻退出"，最常见的原因是 **DSH Desktop 以管理员身份运行**：'
+    + 'Chrome 拒绝在提权父进程下初始化沙箱而静默退出（Edge 不受影响）。'
+    + '解法：让 DSH 以普通权限启动，或在设置里把 chromePath 指向 Edge 等其它 Chromium。')
 }
 
 async function shutdown(kill, only) {
