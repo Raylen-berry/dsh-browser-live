@@ -240,6 +240,14 @@ ok(routes.has('/bl/bridge'), '/bl/bridge 路由已注册')
   // 独立页 /bl/view 本来就是这样写的，面板现在与它一致
   const viewOk = /#stage\{[^}]*flex:1[^}]*min-height:0/.test(readFileSync(path.join(root, 'index.js'), 'utf8'))
   ok(viewOk, '独立页 /bl/view 仍是同一套百分比写法（两处一致）')
+
+  // 残留实例清理：只许碰"本插件 profile"的进程，绝不许误伤用户自己的浏览器
+  const probe = mod.profileOwnerProbeScript(false)
+  const killer = mod.profileOwnerProbeScript(true)
+  ok(/chrome-profile/.test(probe) && /dsh-browser-live/.test(probe), '清理探针只匹配本插件 profile 路径（不会误杀用户自己的 Chrome/Edge）', probe.slice(0, 90))
+  ok(/chrome\.exe/.test(probe) && /msedge\.exe/.test(probe), '探针覆盖 chrome/msedge（brave 也在）', probe.slice(0, 60))
+  ok(!/Stop-Process/.test(probe) && /Stop-Process/.test(killer), '查询脚本不杀进程，只有 kill 版才 Stop-Process')
+  ok(/Write-Output/.test(probe) && /Write-Output/.test(killer), '两种形态都把结果打到 stdout（宿主解析个数）')
 }
 
 ok(!existsSync(path.join(home, 'dsh-browser-live', 'bridge.json')), 'userBridge=false 时不起桥（不写 bridge.json）')

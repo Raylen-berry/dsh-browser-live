@@ -66,6 +66,19 @@ dsh plugin --profile web add link:D:\DeepSeek\dsh-plugins\dsh-browser-live
   扩展掉线时 host 会自动回退到"插件自带实例"这一档，所以"接管失败"往往表现为**换了个后端**而不是报错。
 - 浏览器探测：本机装了 Chrome/Edge/Brave 任一即可；`headless=true` 时无头也能全通，但画面是虚拟的
   （观察窗看的是渲染结果）。首选浏览器起不来会自动降级到下一个候选，并补试兼容参数 `--in-process-gpu`。
+- **浏览器起不来怎么办**（v0.12.0 起自动处理，这里给手动兜底）：症状是工具报
+  「10 秒内没响应 CDP 端口」，而机器上其实有一堆 `msedge.exe`/`chrome.exe` 占着插件的
+  `chrome-profile-*` —— 它们让新实例被"转交"、不开调试端口。原因见 CHANGELOG 0.12.0 §7。
+  一条 PowerShell 清干净（**只匹配本插件数据目录，不碰你自己的浏览器**；不用重启 DSH）：
+
+  ```powershell
+  Get-CimInstance Win32_Process -Filter "Name='chrome.exe' or Name='msedge.exe' or Name='brave.exe'" |
+    Where-Object { $_.CommandLine -and $_.CommandLine.ToLower().Contains(($env:APPDATA + '\dsh-desktop\harness\dsh-browser-live\chrome-profile').ToLower()) } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+  ```
+
+  之后再 `browser_open` 即可。v0.12.0 起 `browser_close` 会等 profile 真正释放（最多 6s）、
+  启动前与启动失败时都会自动清理这类残留，并记一条 `🧹 …` 动作提示（不静默）。
 - 留痕（v0.9.0 起）：所有 `browser_*` 调用与页面自身跳转都追加到
   `$DSH_HOME/dsh-browser-live/audit/YYYY-MM-DD.jsonl`（append-only + 哈希链）。
   `node tools/verify-audit-chain.mjs` 验链；`node tools/verify-audit.mjs` 离线自检 15 项。

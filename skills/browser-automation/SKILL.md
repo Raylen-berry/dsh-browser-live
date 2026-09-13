@@ -110,6 +110,8 @@ browser_snapshot                     # 再观察：确认动作真的生效了
 | `browser_type` 回读 `empty:true` | 输入被页面回滚了：改用 `browser_press` 逐键输入，或先点击该字段获得焦点再输入 |
 | 回读 `matches:false` | 页面做了格式化/截断（如自动加区号）：接受页面上的值，不要反复重填 |
 | 页面结构一直变（骨架屏/无限滚动） | 先 `browser_wait {selectorPresent}` 等到稳定容器，再 snapshot |
+| 工具报「10 秒内没响应 CDP 端口」 | **不要反复 `browser_open` 硬试**（每试一次多留一个窗口，还会锁死 profile）。v0.12.0 起插件会在启动前/失败时自动清理残留并记 `🧹 …` 提示；如果仍失败，给用户 README「浏览器起不来怎么办」里那条 PowerShell（只匹配插件自己的 profile 目录），不要自己去杀进程 |
+| `browser_close` 后立刻 `browser_open` | 正常：关闭要等 profile 释放（≤6s）。先做别的事再开；连续开关容易撞上"转交、没有调试端口" |
 | 搜索引擎被拦（`tried[].reason=blocked`） | 换一个 engine，或等冷却（默认 30s，可配 `settings.searchCooldownMs`）后重试；**不要**因为"预设里没有我要的那个"就放弃，`engineSpec` 可以自带任何搜索页 |
 | `tried[].reason=layout-changed` / `filtered-out` | 选择器问题，不是"网站挂了"：前者改 `item`，后者改 `link/title/text`（`engineSpec` 或 settings 里改，见 §7） |
 | 依旧无解 | 把"我试了什么 + 页面现在什么样（snapshot 片段/截图路径）"交回用户，别自己绕 |

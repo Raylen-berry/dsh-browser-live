@@ -87,6 +87,35 @@ PUT 用**当前设置**当底 ⇒ 非法值只是被忽略。回归用例已加�
 - 新增回归用例：两个 AUDIT 实例**交替写同一文件**，链必须仍然自洽（这是线上真实场景，
   原来的实现必挂）。
 
+### 7. 修掉"关掉浏览器之后再也打不开"的死锁（v0.12.0 收尾验证时实测踩到）
+
+用户重启后我做收尾验证，`browser_close` → 立刻 `browser_open`，结果**再也起不来了**：
+连报两次「10 秒内没响应 CDP 端口（含 `--in-process-gpu`）」，而机器上**多出 10 个 msedge 进程**
+占着 `chrome-profile-msedge`、却**没有进程在听调试端口**。
+
+根因是两个 bug 叠在一起：
+
+1. `shutdown()` 只等 150ms 就返回 —— 而 Chromium 的 `Browser.close` 是异步的，profile 锁要
+   几百 ms~几秒才释放 ⇒ **紧接着重开**时，新进程发现同一 `user-data-dir` 已有实例，
+   就把请求**转交**过去、**不开新的调试端口** ⇒ 插件永远等不到 CDP。
+2. 失败路径里 `browser.proc.kill()` 杀的是 **VBS 启动器**（`launchDetached: true` 的默认路径下
+   浏览器早已脱离我们的进程树）⇒ 浏览器本身还活着、继续锁着 profile ⇒ **每试一次多一个窗口**，
+   越试越糟（自锁死循环）。
+
+修法：
+
+- 新增 `profileOwnerProbeScript()` / `profileOwnerCount()` / `killProfileOwners()` /
+  `waitProfileReleased()`：用 PowerShell 列出（或结束）**命令行里带本插件数据目录**的
+  chrome/msedge/brave 进程 —— 只匹配本插件 profile，**你自己的浏览器绝不会被碰到**。
+- `shutdown(kill)`：`Browser.close` 后**等 profile 真释放**（最多 6s），没释放才强清，并记一条
+  `🧹 …已强制结束` 的动作提示（不静默）。
+- `launch()`：起进程**之前**先清残留（走到这一步说明连不上任何 CDP，那些进程只会让新实例被转交）；
+  启动失败时按 profile 清掉**真正起来的进程**，并记动作提示。
+- 离线断言（verify-host）：探针只匹配本插件 profile、覆盖 chrome/msedge、查询版不含
+  `Stop-Process`（只有 kill 版才杀）。
+
+> 真踩到时的恢复办法见 README「浏览器起不来怎么办」：一条 PowerShell 清干净，不用重启 DSH。
+
 ## 0.11.0 — 搜索改成「机制」而不是「菜单」+ 把"写镜像"这一类 bug 修干净
 
 两件事，都不只是改措辞：

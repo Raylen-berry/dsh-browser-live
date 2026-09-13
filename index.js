@@ -904,6 +904,72 @@ async function applyPercentWindowSize() {
   }
 }
 
+/**
+ * 找出（可选：结束）"占着插件 profile"的浏览器进程 —— 只认命令行里带本插件数据目录的那些。
+ *
+ * 为什么要它（2026-09-14 实测踩到的真 bug）：
+ * 独立启动器（VBS，`launchDetached: true` 的默认路径）让浏览器**脱离我们的进程树**，
+ * 所以起不来时 `browser.proc.kill()` 杀的是启动器、浏览器本身还活着 ⇒ **profile 还被锁着**。
+ * 下一次启动：Chromium 发现同一 user-data-dir 已有实例，就把请求**转交**过去，
+ * **不开新的调试端口** ⇒ 插件一直等不到 CDP、报"10 秒内没响应"，而每试一次还多留一个窗口。
+ * 用户看到的现象就是"关掉浏览器之后再也打不开"。
+ *
+ * 只按插件自己的 profile 路径匹配 ⇒ 你自己的 Chrome/Edge（不同 profile）绝不会被碰到。
+ */
+export function profileOwnerProbeScript(kill = false) {
+  const needle = path.join(BASE_DIR(), 'chrome-profile').toLowerCase().replace(/'/g, "''")
+  const head = 'Get-CimInstance Win32_Process -Filter "Name=\'chrome.exe\' or Name=\'msedge.exe\' or Name=\'brave.exe\'" -ErrorAction SilentlyContinue'
+  const filter = `Where-Object { $_.CommandLine -and $_.CommandLine.ToLower().Contains('${needle}') }`
+  const body = kill
+    ? `$n=0; ${head} | ${filter} | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop; $n++ } catch {} }; Write-Output $n`
+    : `Write-Output (@(${head} | ${filter}).Count)`
+  return body
+}
+
+/** 跑一段 PowerShell（Windows 才有；其它平台返回 null，调用方当"查不到"处理）。 */
+async function runPs(script, timeoutMs = 10000) {
+  if (process.platform !== 'win32') return null
+  return await new Promise((resolve) => {
+    let out = ''
+    let done = false
+    const finish = (v) => { if (!done) { done = true; resolve(v) } }
+    try {
+      const p = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
+      p.stdout.on('data', (d) => { out += String(d) })
+      p.on('error', () => finish(null))
+      p.on('exit', () => finish(out.trim()))
+      setTimeout(() => { try { p.kill() } catch { /* ignore */ } finish(out.trim() || null) }, timeoutMs)
+    } catch { finish(null) }
+  })
+}
+
+/** 占着插件 profile 的进程数（查不到返回 null，不当作 0 —— 免得误判"已经干净了"）。 */
+async function profileOwnerCount() {
+  const out = await runPs(profileOwnerProbeScript(false))
+  if (out === null) return null
+  const n = Number(String(out).trim().split(/\s+/).pop())
+  return Number.isFinite(n) ? n : null
+}
+
+/** 结束占着插件 profile 的残留进程。返回结束的个数（查不到/非 Windows 返回 null）。 */
+async function killProfileOwners() {
+  const out = await runPs(profileOwnerProbeScript(true), 12000)
+  if (out === null) return null
+  const n = Number(String(out).trim().split(/\s+/).pop())
+  return Number.isFinite(n) ? n : null
+}
+
+/** 等 profile 被释放（进程真的退出要几百毫秒到几秒），超时返回 false。 */
+async function waitProfileReleased(maxMs = 5000) {
+  const t0 = Date.now()
+  while (Date.now() - t0 < maxMs) {
+    const n = await profileOwnerCount()
+    if (n === 0) return true
+    await sleep(250)
+  }
+  return false
+}
+
 async function launch() {
   // 用户浏览器会话：不拉任何进程，直接用扩展那条链路
   const cur = browser.session
@@ -982,6 +1048,17 @@ async function launch() {
         'about:blank',
       ]
       let launched = false
+      // 起进程之前先收拾"占着本插件 profile 的残留实例"：走到这里说明我们**连不上任何 CDP**，
+      // 而只要还有进程锁着这个 profile，新起的 Chromium 会转交给它、不开调试端口 ⇒ 必然白等 10 秒。
+      // （这不是"预防性杀进程"：只匹配本插件数据目录，你自己的浏览器不受影响。）
+      {
+        const n0 = await profileOwnerCount()
+        if (n0 && n0 > 0) {
+          const killed = await killProfileOwners()
+          noteAction(`🧹 检测到 ${n0} 个占着插件 profile 的残留浏览器进程（连不上 CDP），已结束 ${killed ?? '?'} 个再启动`)
+          await sleep(400)
+        }
+      }
       if (settings.launchDetached !== false) {
         try {
           const vbs = writeDetachedLauncher(exe, args)
@@ -1026,6 +1103,12 @@ async function launch() {
       }
       try { if (browser.proc) browser.proc.kill() } catch { /* 已经退了 */ }
       browser.proc = null
+      // 独立启动器下 proc 是启动器，杀它杀不到浏览器 —— 失败时必须按 profile 把真正起来的进程收掉，
+      // 否则它锁着 profile、下次启动被转交，用户看到的就是"关掉后再也打不开"。
+      try {
+        const killed = await killProfileOwners()
+        if (killed) noteAction(`🧹 本次启动失败，已清掉 ${killed} 个残留浏览器进程（否则它们会锁住 profile 让下次也起不来）`)
+      } catch { /* 清理失败不影响报错 */ }
       failures.push(label + (extra.length ? `（含 ${extra.join(' ')}）` : '') + '：10 秒内没响应 CDP 端口')
       console.warn(`[dsh-browser-live] ${label}${extra.length ? '（兼容参数）' : ''} 起不来`)
     }
@@ -1055,6 +1138,15 @@ async function shutdown(kill, only) {
   await sleep(150)
   // 独立启动时 proc 是启动器，杀它没用；Browser.close（上面那条 CDP）才是真正关 Chrome 的手段
   try { if (kill && browser.proc && !browser.detachedLaunch) browser.proc.kill() } catch {}
+  // 关键是"确认真的退干净了"：Browser.close 是异步的，只等 150ms 就返回的话，
+  // profile 还锁着（锁在几百 ms~几秒后才释放）⇒ 紧接着重开会掉进"转交、没有调试端口"的死循环。
+  if (kill) {
+    const released = await waitProfileReleased(6000)
+    if (!released) {
+      const killed = await killProfileOwners()
+      noteAction(`🧹 关闭后 profile 仍被 ${killed ?? '?'} 个进程占着，已强制结束（否则下次启动会被转交、起不来）`)
+    }
+  }
   try { s.cdp?.close() } catch {}
   s.cdp = null; s.tabs = []; s.selected = null
   browser.primary = null; browser.local = null; browser.proc = null
