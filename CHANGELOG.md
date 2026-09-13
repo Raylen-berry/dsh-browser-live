@@ -1,5 +1,19 @@
 # 变更记录
 
+## 0.9.2 — 修 v0.3.2「新开标签页」的竞态：附加调试器时页面还是 about:blank
+
+起因：用户重载扩展后实测 `browser_open {use:"edge", newTab:true}` 仍报「站点未授权：该页面」。
+根因**不是授权配置**，是我自己 v0.3.2 的实现缺陷：host 调 `Target.createTarget` 后**立刻**附加调试器，
+而那一刻新标签页的 `url` 还是 `about:blank`（真实地址在 `pendingUrl` 里）⇒ 授权门禁误判、整次调用白跑。
+
+- 扩展 v0.3.3：新增 `effectiveUrl(tab)`（**`pendingUrl` 优先**），判权限 / 判打码 / 判归属全部改用它
+  （`attachTab` 三处判定 + `redact`）。
+- `Target.createTarget` 建页后**等它真正落到目标地址**再回报（最多 5s；`about:blank` 不等待），
+  从源头消除竞态，而不是只在下游打补丁。
+- 回归测试（`tools/verify-extension.mjs`）两条：① 构造"新页 url 仍是 about:blank、pendingUrl 才是目标"
+  的替身，断言 `createTarget` 后能**立刻** `attachToTarget` 成功（旧代码在这条上必报未授权）；
+  ② 反向断言 pendingUrl 指向**未授权**站点时依旧拒绝 —— 别把"看 pendingUrl"变成放水。
+
 ## 0.9.1 — 用户浏览器档放开 `Target.createTarget`：agent 可以新开标签页了（弹窗可控）
 
 起因（用户 2026-09-12）："扩展不允许新开标签页，这个还是很有必要"。之前那句"可随意 newTab"

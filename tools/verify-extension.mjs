@@ -237,6 +237,36 @@ await denied('Target.createTarget', { url: 'chrome://settings' }, 'createTarget 
   ok(cl && cl.success === true, 'agent 自己新开的页可以被它自己关')
 }
 await denied('Target.closeTarget', { targetId: '12' }, 'Target.closeTarget：不是 agent 开的页 → 拒绝', /只能关闭 agent 自己打开的标签页/)
+// v0.3.3 回归：新开标签页后**立刻**附加 —— 此刻页面可能仍是 about:blank，
+// 真实地址在 pendingUrl。授权判定必须看 pendingUrl，否则误报"站点未授权"（实测踩到）。
+{
+  const realCreate = globalThis.chrome.tabs.create
+  globalThis.chrome.tabs.create = async (props) => {
+    const id = TABS.reduce((m, t) => Math.max(m, t.id), 20) + 1
+    const t = { id, url: 'about:blank', pendingUrl: (props && props.url) || '', title: '', active: true, windowId: 1 }
+    TABS.push(t)
+    calls.tabsCreate.push({ id, url: t.pendingUrl })
+    return { ...t }
+  }
+  const nt2 = await srv.send('Target.createTarget', { url: 'https://allowed.test/fresh' }, sid)
+  ok(nt2 && typeof nt2.targetId === 'string', 'createTarget 在"还在加载"的页上仍返回 targetId', JSON.stringify(nt2))
+  let att = null
+  let attachErr = ''
+  try {
+    att = await srv.send('Target.attachToTarget', { targetId: nt2.targetId, intendedUrl: 'https://allowed.test/fresh' }, sid, 6000)
+  } catch (e) { attachErr = e.message }
+  ok(att && att.sessionId && !attachErr, '刚新开的页可立刻附加（pendingUrl 参与授权判定）', attachErr)
+  // 反向：pendingUrl 指向未授权站点时仍必须拒绝（别把"看 pendingUrl"变成放水）
+  let badErr = ''
+  try {
+    globalThis.chrome.tabs.create = async () => ({ id: 999, url: 'about:blank', pendingUrl: 'https://evil.test/x', title: '', active: true, windowId: 1 })
+    TABS.push({ id: 999, url: 'about:blank', pendingUrl: 'https://evil.test/x', title: '', active: true, windowId: 1 })
+    const nt3 = await srv.send('Target.createTarget', { url: 'https://evil.test/x' }, sid)
+    await srv.send('Target.attachToTarget', { targetId: nt3.targetId, intendedUrl: 'https://evil.test/x' }, sid, 6000)
+  } catch (e) { badErr = e.message }
+  ok(/未授权/.test(badErr), 'pendingUrl 指向未授权站点时依旧拒绝（没有放水）', badErr)
+  globalThis.chrome.tabs.create = realCreate
+}
 // 关标签页是**有条件的白名单**：只放行 agent 自己开的页（见 verify-extension-v2 的 D 段测放行）。
 // 弹窗开关关掉之后，连自己开的也不许关 —— P0 只读优先。
 await ext.__internals.POPUP_API.setCloseOwn(false)

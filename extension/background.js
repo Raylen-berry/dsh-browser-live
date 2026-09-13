@@ -126,12 +126,26 @@ export function isAllowed(url) {
   const o = originOf(url)
   return !!o && state.cfg.origins.includes(o)
 }
+
+/**
+ * 标签页的"有效 URL"：加载中的页面 Chrome/Edge 会把目标地址放在 `pendingUrl`，
+ * 而 `url` 还是上一页（新开的标签页则是 about:blank）。
+ * ⚠️ 只看 `url` 会踩这个坑（v0.3.2 实际故障）：agent 新开标签页后**立刻**附加调试器，
+ * 那一刻 `url` 还是 about:blank ⇒ 授权门禁判成"站点未授权"，整次 browser_open 白跑。
+ * 判权限、判打码、判归属，一律用这个函数。
+ */
+export function effectiveUrl(tab) {
+  if (!tab) return ''
+  const p = typeof tab.pendingUrl === 'string' ? tab.pendingUrl : ''
+  const u = typeof tab.url === 'string' ? tab.url : ''
+  return p.length > 0 ? p : u
+}
 function redact(tab) {
-  const ok = isAllowed(tab.url)
+  const ok = isAllowed(effectiveUrl(tab))
   return {
     targetId: String(tab.id),
     type: 'page',
-    url: ok ? String(tab.url || '') : '',
+    url: ok ? String(effectiveUrl(tab) || '') : '',
     title: ok ? String(tab.title || '') : '(未授权站点)',
     allowed: ok,
   }
@@ -150,7 +164,7 @@ async function attachTab(tabId0, intendedUrl) {
   // ⚠ 顺序很要紧：「要不要换一个标签页」必须判在 byTab 缓存**之前**。
   // v0.8.3 的第一版把它放在缓存之后，于是"已经附着过的未授权前台页"走了缓存直接返回，
   // 就地导航的老行为又回来了 —— 实测踩到（前台先被 browser_navigate 附着过，再 browser_open 就中招）。
-  if (!isAllowed(tab.url) && want && isAllowed(want)) {
+  if (!isAllowed(effectiveUrl(tab)) && want && isAllowed(want)) {
     // 只放行「去一个已授权站点」这一种情况，而且**绝不动你正在看的那个页面**：
     // 新开一个标签页过去、附加到**新标签页**。（v0.8.1 原来是就地导航，会把你前台的页面顶掉 ——
     // 你只是让 agent 去看一眼别的东西，不该付出"我正在读的页面被换掉"的代价。）
@@ -163,15 +177,15 @@ async function attachTab(tabId0, intendedUrl) {
     for (let i = 0; i < 50; i++) {           // 最多等 5s 落到已授权 origin
       await sleep(100)
       tab = await chrome.tabs.get(tabId).catch(() => null)
-      if (tab && isAllowed(tab.url)) break
+      if (tab && isAllowed(effectiveUrl(tab))) break
     }
-    if (!tab || !isAllowed(tab.url)) {
-      throw new Error(`新开的标签页没能落在已授权站点 ${originOf(want)}（当前 ${originOf(tab && tab.url) || '未知'}），已放弃附加`)
+    if (!tab || !isAllowed(effectiveUrl(tab))) {
+      throw new Error(`新开的标签页没能落在已授权站点 ${originOf(want)}（当前 ${originOf(effectiveUrl(tab)) || '未知'}），已放弃附加`)
     }
   } else if (state.byTab.has(tabId)) {
     return { sessionId: state.byTab.get(tabId), tabId }   // 这个标签页本来就是已授权且已附着，直接用
-  } else if (!isAllowed(tab.url)) {
-    const o = originOf(tab.url) || '该页面'
+  } else if (!isAllowed(effectiveUrl(tab))) {
+    const o = originOf(effectiveUrl(tab)) || '该页面'
     throw new Error(`站点未授权：${o}。点扩展图标 →「允许此站点」后再试（P0 逐站点授权）`)
   }
   await chrome.debugger.attach({ tabId }, '1.3')
@@ -284,6 +298,18 @@ export async function handleCommand({ method, params = {}, sessionId }) {
     if (!/^(https?:|about:)/i.test(url)) throw new Error('只允许新开到 http/https/about 页面')
     const tab = await chrome.tabs.create({ url, active: true })
     state.ownedTabs.add(tab.id)
+    // 等它真正落到目标地址再回报：不等的话 host 会**立刻**附加调试器，而此刻
+    // 页面通常还是 about:blank ⇒ 被授权门禁误判成"站点未授权"（v0.3.2 实测故障，
+    // host 侧会看到 `站点未授权：该页面`）。最多等 5s，超时也照样返回，让上层报真话。
+    if (url !== 'about:blank') {
+      for (let i = 0; i < 50; i++) {
+        const cur = await chrome.tabs.get(tab.id).catch(() => null)
+        if (!cur) break
+        const u = effectiveUrl(cur)
+        if (u.length > 0 && u !== 'about:blank' && u !== 'chrome://newtab/') break
+        await sleep(100)
+      }
+    }
     note(`agent 新开标签页 #${tab.id} → ${url.slice(0, 80)}`)
     return { targetId: String(tab.id) }
   }

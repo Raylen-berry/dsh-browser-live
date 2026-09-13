@@ -47,8 +47,11 @@ window.__ModuleLoader__.load({
       '.bl-fab-ghost::before{content:"";position:absolute;inset:-8px -8px -6px;border-radius:14px;background:rgba(20,18,26,.3);backdrop-filter:blur(7px) saturate(.9);box-shadow:inset 0 0 0 1px rgba(255,255,255,.08)}',
       // 兜底球的层级也走样式表（不写行内）：让位时把 style.zIndex 置空才能回到基值
       '.bl-fab-fallback{position:fixed;left:18px;bottom:18px;z-index:2147483050;box-shadow:0 6px 20px rgba(0,0,0,.22)}',
-      '.bl-panel{position:fixed;right:18px;bottom:18px;z-index:2147483050;width:560px;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);background:var(--dsw-alias-bg-layer-2,#fff);border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.3));border-radius:14px;box-shadow:0 14px 44px rgba(0,0,0,.28);display:flex;flex-direction:column;overflow:hidden;font-size:12px;color:var(--dsw-alias-label-primary,#222)}',
-      '.bl-panel.bl-wide{width:900px}',
+      // 宽度改成随视口收缩（2026-09-13）：原来是写死的 560px / 900px，
+      // 在 700px 宽的半屏窗口里 560px 要占掉 80%，必然压住会话区。
+      // 现在全屏仍是 560/900，窄屏自动收窄；max-width 继续兜底。
+      '.bl-panel{position:fixed;right:18px;bottom:18px;z-index:2147483050;width:clamp(300px,42vw,560px);max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);background:var(--dsw-alias-bg-layer-2,#fff);border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.3));border-radius:14px;box-shadow:0 14px 44px rgba(0,0,0,.28);display:flex;flex-direction:column;overflow:hidden;font-size:12px;color:var(--dsw-alias-label-primary,#222)}',
+      '.bl-panel.bl-wide{width:clamp(300px,66vw,900px)}',
       '.bl-panel.bl-snap{transition:left .16s ease,top .16s ease}',
       '.bl-hd{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.2));flex:none;cursor:grab;user-select:none}',
       '.bl-hd.bl-drag{cursor:grabbing}',
