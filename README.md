@@ -373,6 +373,16 @@ host(index.js) ──WS──> 扩展（extension/, MV3，Chrome 和 Edge 各装
 
 ## 版本与变更记录
 
+- **v0.10.1**：**把 v0.10.0 拉到真网站上跑，两个修复** ——
+  ①「**新开标签页后当前页还在旧页**」这个既有 bug（`browser_open {newTab}`／`browser_tabs new` 都中招；
+  `browser_search` 因此在旧页上抽取并误报"页面还没加载完"）：`Target.createTarget` 异步生效 +
+  `refreshTabs` 会把"列表里找不到的 selected"重置回 `tabs[0]` + `browser.selected` 只是会话字段的镜像，
+  三件事叠加；统一改成 `openTabAndSelect()`（等它真的出现在列表里再切），并有回归测试钉住。
+  ②「**百度那条链从来就没成功过**」：标题链接是 `baidu.com/link?url=<加密串>`，被"自家内链不算结果"
+  的守卫（要求以 `/link` **结尾**）全部误杀 —— 8 条结果 0 条返回，还报成"引擎改版"；
+  现在跳转链保留并标 `viaEngineRedirect`，摘要选择器按实测补上 `[class*=summary]`。
+  两条教训：**夹具要照抄实测到的 DOM，不能照抄我的推测**（第一版百度夹具是猜的，于是测试全绿、
+  线上 0 条）；选择器表 `SEARCH_ENGINES` 改为 export 供测试直接引用，防止"测试里另抄一份"。
 - **v0.10.0**：**「读得懂、抓得到、搜得了」+ 把调用方案做成技能** —— 从 7 个同类 MIT 插件（生态索引里
   找的真实等价物；用户给的那 4 个 URL 六条路径全 404）蒸馏出 `browser_read`（正文四级降级 + 噪音剥离 +
   Markdown + **段落感知截断**）、`browser_scrape`（`item`+`fields` 结构化抓取）、`browser_search`

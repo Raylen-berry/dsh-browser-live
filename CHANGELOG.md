@@ -1,5 +1,71 @@
 # 变更记录
 
+## 0.10.1 — 联网实测逼出来的两个修复（一个既有 bug，一个"没实测就等于没有"）
+
+v0.10.0 交付时我明确标注了两处**只在静态层面成立**的东西：搜索的引擎选择器没在联网环境跑过、
+新工具只经本地夹具验证。这一版就是把它们拉到真网站上跑，结果两处都出事。
+
+### 修复 1：新开标签页后，当前页其实还停在旧页（既有 bug，三处调用点）
+
+现象：`browser_tabs {action:'new'}` 返回 `ok:true`，但紧随的调用仍落在**旧标签页**上；
+`browser_search` 因此在旧页（当时是 `about:blank`）上抽取，如实报成"页面还没加载完" ——
+一个看起来像"网络慢/被反爬"的现象，实际是选页错了。
+
+根因是三件事叠加：
+
+1. `Target.createTarget` **异步生效**，紧接着那一次 `refreshTabs` 可能还看不到新 target；
+2. 而 `refreshTabs` 结尾会把"在列表里找不到的 selected"**重置回 `tabs[0]`**；
+3. `browser.selected` 只是活跃会话 `s.selected` 的**镜像**（`viewOf` 里同步），写镜像会被下一次同步覆盖 ——
+   所以要写的是 `s.selected`。
+
+`browser_open {newTab:true}` 与 `browser_tabs {action:'new'}` 是同一条老路（v0.9.2 只修了扩展档：
+"等着陆"是扩展实现的行为，插件自带实例这条从来没等过）。现在统一走 `openTabAndSelect()`：
+建 target → 轮询等它出现在列表（≤3s）→ 写 `s.selected` → 附加 → 再同步镜像。
+
+回归测试（`tools/verify-web-tools.mjs`）：新开页后 `location.href` 必须是新页、标题必须是新页的、
+标签页列表里选中的必须是新页；`browser_open {newTab:true}` 同验。
+
+### 修复 2：百度那条链从来就没成功过（且会把人引向错误的排查方向）
+
+百度的实测结果：**8 条结果被全部丢掉**，工具报 `layout-changed`（"引擎改版了，去改选择器"）——
+而真实原因跟选择器无关：
+
+- 标题链接是 `http://www.baidu.com/link?url=<加密串>`，页内**解不开**成真实 URL；
+- `SEARCH_FN` 里"引擎自家内链不算结果"的守卫写的是 `/\/url$|\/link$/` —— 要求**以 `/link` 结尾**，
+  带查询参数就匹配不上，于是把真结果当内链全杀了。它的本意只是滤掉"图片/更多"这类内链。
+- 另外，新卡片版的摘要已经不在 `.c-abstract`（实测 0 命中），而在 `[class*=summary]`（哈希后缀类名）。
+
+修法：守卫改成"引擎域名 **且** 不是跳转链形态"才丢（`[\/?](url|link|redirect)=`、`\/ck\/a`、`uddg=`）；
+解不开的跳转链**保留**并标 `viaEngineRedirect: true`，工具输出里补 `redirectNote` 说明"要真实地址就
+navigate 过去再看 location.href"；百度 spec 的 text 补 `[class*="summary"]`（保留 `.c-abstract` 兼容老版式）。
+
+### 这两件事共同的教训
+
+**夹具必须照抄实测到的 DOM，不能照抄我的推测。** 我第一版百度夹具就是按"通用约定"写的，
+于是测试全绿、线上 0 条 —— 绿得毫无意义。现在夹具里的百度结构是从真实 SERP 上量下来的
+（含加密跳转链与 `[class*=summary]`），并且 `SEARCH_ENGINES` 改为 **export** 供测试直接引用，
+避免"测试里另抄一份选择器表"（抄一份的后果是：表改了测试照样绿）。
+
+同时把"选择器腐烂"这件事变成一条**可自查**的路径：`layout-changed` 的返回里带着命中数、
+样例文本与修复指引；而"抓到 item 但 0 条结果"这种中间态不再被误报成改版。
+
+### 实测记录（2026-09-13，插件自带实例 + 无头 Edge）
+
+| 项目 | 结果 |
+| --- | --- |
+| `browser_search` Bing | ✅ 5 条结构化结果（`li.b_algo` 一次命中） |
+| `browser_search` 百度 | ❌→✅（修复 2；修复前 0 条并误报 layout-changed） |
+| `browser_read` 真实文章 | ✅ `source:"article"`、Markdown、17 个标题大纲、链接清单、12k 字符按段续读 |
+| `browser_scrape` 真实 SERP | ✅ 8 命中 / 5 返回，标题+链接+摘要字段全对 |
+| `browser_snapshot` | ✅ 140 元素带稳定 ref、`refsInfo{known:140,reused:0}`、视口外 `outside`、重名 `ctx` 消歧 |
+| 点击被遮挡元素 | ✅ `{ok:false,reason:"covered"}`（不再"报成功但页面没反应"） |
+| 点击禁用元素 | ✅ `{ok:false,reason:"disabled"}` |
+| 输入后回读 | ✅ `matches:true` + 回显值 |
+| 人机验证识别 | ✅ Cloudflare 拦页识别出 `challenge.kind="cloudflare"` 并给出"停下问人"的指引 |
+
+未覆盖：DDG 未实测；`browser_read` 读 GitHub README 时会把徽章图片链接原样保留（内容正确、
+观感偏吵）—— 已知观感问题，未改。
+
 ## 0.10.0 — 网页理解三件套 + 调用方案技能（从 7 个同类插件蒸馏，零新依赖）
 
 起因：用户要的是"**读得懂、抓得到、搜得了**"，以及"后续所有 agent 都能方便快捷地调用"。

@@ -319,6 +319,40 @@ console.log('\n[3] SEARCH_FN —— SERP 抽取与归一')
   ok(raw.emptyReason === '', '有条目时 emptyReason 为空')
   ok(raw.blocked === false, '正常结果页不判为被拦')
 
+  // ---- 百度：夹具**照抄 2026-09-13 联网实测到的真实 DOM**（不是我猜的结构）----
+  // 教训：我第一版百度选择器是凭通用约定推的，夹具也跟着我猜的结构写，于是测试全绿、线上 0 条。
+  // 实测拿到的两件事：① 标题链接是 http://www.baidu.com/link?url=<加密串>（页内解不开，
+  // 但**必须留下**，且要标 viaEngineRedirect）；② 摘要新卡片版在 [class*=summary]（哈希后缀类名）里。
+  const baiduFile = w('baidu-serp.html', `<!doctype html><html><head><meta charset="utf-8"><title>测试_百度搜索</title></head><body>
+<div id="content_left">
+  <div class="result c-container xpath-log new-pmd">
+    <div class="cosc-card aladdin-struct_r13eS">
+      <h3 class="t"><a href="http://www.baidu.com/link?url=l1ZgPzC0F5xQfUp03mmAeSHhQVGDH6hvrjcrFE8otmCVMLY1cmWUZTFRxmkyGnF8E26MZOaeVwUXevAEYgd7MjGVKipsobLOMPmMp_gm0Fq">百度结果一 · GitHub</a></h3>
+      <div class="cos-color-text-tiny summary-gap_68jXq">第一条摘要：新卡片版把摘要放在 [class*=summary] 里。</div>
+    </div>
+  </div>
+  <div class="result c-container xpath-log new-pmd">
+    <h3 class="t"><a href="http://www.baidu.com/link?url=U7irskomgJbU4UNSPhwZ0meIMTigcGKRZMycXdgqKTjFgiI6fB6GTYJqbKJrk9YXjFUrnIrD95lBbIFYkOka6K">百度结果二</a></h3>
+    <div class="c-abstract">老版式摘要：.c-abstract 也得兼容。</div>
+  </div>
+  <div class="result c-container xpath-log new-pmd">
+    <h3 class="t"><a href="https://example.com/normal">正常站点结果（不是跳转链）</a></h3>
+    <div class="c-abstract">正常站点的摘要。</div>
+  </div>
+  <div class="c-container"><a href="https://www.baidu.com/more/">百度更多（引擎内链，应被过滤）</a></div>
+</div></body></html>`)
+  const bdx = await openFixture(baiduFile)
+  const bspec = { ...mod.SEARCH_ENGINES.baidu.spec, limit: 10 }
+  const braw = await bdx.inject(FNS.SEARCH_FN, [bspec])
+  ok(braw.count === 3, '百度：3 条真结果（"更多"内链被过滤）', JSON.stringify(braw.items && braw.items.map((x) => x.url && x.url.slice(0, 40))))
+  ok(braw.emptyReason === '', '百度：不算空结果（曾误报 layout-changed）', braw.emptyReason)
+  ok(braw.items[0] && /^https?:\/\/www\.baidu\.com\/link\?url=/.test(braw.items[0].url), '百度：加密跳转链被保留（解不开也得留）', braw.items[0] && braw.items[0].url.slice(0, 50))
+  ok(braw.items[0] && braw.items[0].viaEngineRedirect === true, '百度：解不开的跳转链被如实标注 viaEngineRedirect')
+  ok(braw.items[0] && braw.items[0].snippet.includes('summary'), '百度：新卡片版摘要从 [class*=summary] 取到', braw.items[0] && braw.items[0].snippet.slice(0, 40))
+  ok(braw.items[1] && braw.items[1].snippet.includes('老版式'), '百度：老版式 .c-abstract 仍然兼容', braw.items[1] && braw.items[1].snippet.slice(0, 40))
+  ok(braw.items.every((x) => !/baidu\.com\/more/.test(x.url)), '百度：引擎自家内链（/more/）被剔除')
+  ok(braw.items[2] && braw.items[2].url === 'https://example.com/normal' && !braw.items[2].viaEngineRedirect, '普通站点 URL 不打跳转链标记', braw.items[2] && JSON.stringify(braw.items[2]))
+
   // host 侧归一：丢 utm、去 www、剥 fragment、去尾斜杠，重复项合并且保留更长摘要
   const merged = mod.mergeSearchResults([
     { url: 'https://www.example.com/two/?utm_source=x&utm_medium=y#frag', title: 'A', snippet: '短' },

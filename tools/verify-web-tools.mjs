@@ -155,7 +155,28 @@ ok(has(typed, '"ok":true', '"matches":true'), '输入后回读匹配', typed.sli
 const typedBad = await call('browser_click', { selector: '#b2', force: true })
 ok(has(typedBad, '"ok":true'), 'force:true 时跳过检查（给"就是要硬点"留出口）', typedBad.slice(0, 200))
 
-console.log(`\n[7] browser_search 的参数校验（不联网）`)
+console.log(`\n[7] 新开标签页必须**真的切过去**（v0.10.0 联网实测抓到的既有 bug）`)
+// 现象：browser_tabs {action:'new'} 报 ok:true，但当前页还是旧标签页 —— 后续调用全落在旧页上。
+// 根因：Target.createTarget 异步生效 + refreshTabs 把"列表里找不到的 selected"重置回 tabs[0]
+//       + browser.selected 只是会话 selected 的镜像（写镜像会被下一次同步覆盖）。
+// 实测后果：browser_search 在旧页（about:blank）上抽取，报成"页面还没加载完"。
+writeFileSync(rel('other.html'), `<!doctype html><html><head><meta charset="utf-8"><title>另一个页面</title></head><body><p>${'另一个页面的正文。'.repeat(30)}</p><button id="ob">另一个页面的按钮</button></body></html>`)
+const beforeTab = await call('browser_eval', { expression: 'location.href' })
+const tabNew = await call('browser_tabs', { action: 'new', url: fileUrl('other.html') })
+ok(has(tabNew, '"ok":true'), 'browser_tabs new 返回成功', tabNew.slice(0, 160))
+const afterTab = await call('browser_eval', { expression: 'location.href' })
+ok(afterTab.includes('other.html'), '新开之后**当前页就是新页**（不是还停在旧页）', JSON.stringify({ before: beforeTab.slice(-40), after: afterTab.slice(-60) }))
+const afterTitle = await call('browser_eval', { expression: 'document.title' })
+ok(afterTitle.includes('另一个页面'), '新页的标题也读得到（确实在新页上执行）', String(afterTitle).slice(0, 80))
+const listRes = JSON.parse(await call('browser_tabs', { action: 'list' }))
+const sel = listRes.tabs.filter((t) => t.selected)
+ok(sel.length === 1 && sel[0].url.includes('other.html'), '标签页列表里选中的正是新页', JSON.stringify(listRes.tabs.map((t) => [t.i, t.selected, t.url.slice(-24)])))
+const openNew = await call('browser_open', { url: fileUrl('page.html'), newTab: true })
+ok(has(openNew, '"ok":true'), 'browser_open {newTab:true} 成功', openNew.slice(0, 120))
+const afterNew = await call('browser_eval', { expression: 'location.href' })
+ok(afterNew.includes('page.html'), 'browser_open {newTab:true} 之后当前页也是新开的那个', String(afterNew).slice(-60))
+
+console.log(`\n[8] browser_search 的参数校验（不联网）`)
 const badEngine = await call('browser_search', { query: 'x', engine: 'google-but-not-a-real-key' })
 ok(has(badEngine, '"ok":false', '未知引擎'), '未知引擎名被拒并列出可用引擎', badEngine.slice(0, 240))
 let queryErr = null

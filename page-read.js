@@ -555,19 +555,25 @@ export function searchPageInPage(spec) {
     if (!a) continue
     var url = unwrap(a.getAttribute('href') || a.href || '')
     if (!/^https?:/i.test(url)) continue
-    // 引擎自家的内链（"更多结果"/"图片"之类）不是结果
-    try {
-      var hu = new URL(url).hostname.replace(/^www\./, '')
-      if (/^(bing|baidu|duckduckgo|google|microsoft|msn|go\.microsoft)\./.test(hu) || /(^|\.)(bing|baidu|duckduckgo|google)\.com$/.test(hu)) {
-        if (!/\/url$|\/link$/.test(url)) continue
-      }
-    } catch (e) { }
+    // 引擎自家的内链（"图片"、"更多结果"、"设置"）不是结果；但**引擎的跳转链是结果**，必须留。
+    // v0.10.0 联网实测踩到：百度结果的标题链接是 http://www.baidu.com/link?url=<加密串>，
+    // 而这里原来写的是 /\/url$|\/link$/（要求"以 /link 结尾"）—— 带查询参数就匹配不上，
+    // 于是 8 条结果被这条守卫全部丢掉，工具却报成"引擎改版了"，很容易把人引到"去改选择器"的错路上。
+    var hu = ''
+    try { hu = new URL(url).hostname.replace(/^www\./, '') } catch (e) { hu = '' }
+    var engineHost = /(^|\.)(bing|baidu|duckduckgo|google|microsoft|msn)\./.test(hu)
+    var isRedirect = /[\/?](url|link|redirect)=|\/url$|\/link$|\/ck\/a|uddg=/.test(url)
+    if (engineHost && !isRedirect) continue
     var tEl = pick(box, spec.title)
     var sEl = pick(box, spec.text)
     var title = trimmed((tEl && (tEl.innerText || tEl.textContent)) || a.innerText || a.getAttribute('aria-label') || '')
     var snippet = trimmed((sEl && (sEl.innerText || sEl.textContent)) || '')
     if (!title && !snippet) continue
-    out.push({ rank: out.length + 1, title: title.slice(0, 200), url: url, snippet: snippet.slice(0, 400) })
+    var row = { rank: out.length + 1, title: title.slice(0, 200), url: url, snippet: snippet.slice(0, 400) }
+    // 解不开的跳转链（百度的 link?url= 是加密串，页内解不出来）要如实标注：
+    // 否则 agent 会以为拿到的是最终 URL 而直接引用/展示。
+    if (engineHost && isRedirect) row.viaEngineRedirect = true
+    out.push(row)
   }
 
   var bodyText = document.body ? String(document.body.innerText || '') : ''
