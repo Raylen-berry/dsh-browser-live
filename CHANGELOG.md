@@ -1,5 +1,62 @@
 # 变更记录
 
+## 0.10.0 — 网页理解三件套 + 调用方案技能（从 7 个同类插件蒸馏，零新依赖）
+
+起因：用户要的是"**读得懂、抓得到、搜得了**"，以及"后续所有 agent 都能方便快捷地调用"。
+手上那 4 个参考插件的 URL 是编造的（`github.com/deepseek-ai/plugin-*` 六条路径全 404、
+`org:deepseek-ai` 零个含 plugin/dsh 的仓库），所以改成在生态索引（3632 个插件）里找**真实等价物**，
+克隆 7 个 MIT 仓库读源码，按"在浏览器上下文里成立"的标准蒸馏 —— 不是搬运。
+
+新增三个工具（都靠注入脚本 + 现有 CDP 通道实现，**没有新增任何 npm 依赖**）：
+
+- `browser_read`：正文结构化读取。四级正文降级（多 `article` ≥200 字 / `role=main` / `main` /
+  最大文本块）、噪音剥离（raw 元素 + 结构噪音 + **只在容器标签上生效**的类名黑名单 + 链接密度
+  `<300 字且链接占比 >65%` 判推荐位）、Markdown 输出（标题层级/列表/表格/代码块/链接，表格 25 行封顶）、
+  段落感知截断（offset 续读不会把句子劈开）、元信息（meta/og/**JSON-LD 递归**/`articleBody` 反爬兜底）。
+- `browser_scrape`：`item` + `fields`（`"a@href"` 取链接并绝对化、`@html`、`@text`）把重复结构抓成行数据，
+  命中不到时自适应重试并回报匹配数 —— 相当于"不用写 JS 的 browser_eval"。
+- `browser_search`：在**真实浏览器**里搜（Bing/百度/DDG HTML），结果解析成 `{title,url,snippet}`；
+  内置跳转链解包（`uddg=`、`u=`、`bing.com/ck/a?u=`）、引擎内链过滤、URL 归一化去重（剥 utm/fragment/www）、
+  三态空结果判定（**被拦 / 没加载完 / 引擎改版**）、引擎级 30s 冷却与 20s 总预算。
+  刻意不用 Google（验证码同样中招）、不用 Bing RSS（浏览器里变 XML）、不用 SearXNG json（实例多已关闭）。
+
+观察与动作层补强（都不是新工具，是修既有短板）：
+
+- **ref 改成跨快照稳定**：原来每次快照重置 `window.__BL_REFS`，于是"上次拿的 ref=7"在页面重排后
+  **会指向另一个元素** —— agent 会安静地点错东西。现在用「元素 → id」WeakMap + 只增不减的计数器，
+  id 永不复用，元素没了就明确报"ref 失效"。已脱离文档的旧条目顺手清掉。
+- **快照状态内联 + 交互恢复**：每行带 `flags`（disabled/readonly/checked/pointer-events-none/
+  outside/covered-by:X）；React/Vue 的 `onClick` 走事件委托、DOM 上**没有** onclick 属性，
+  只按选择器收元素会漏掉一大片真按钮 ⇒ 对"有名字的叶子块"做一次有上限的 `cursor:pointer` 探测。
+  重名元素补 `ctx`（三个"编辑"只有上下文能分辨）。顺带修隐私问题：**password 的值不再进快照**。
+- **点/输入前做可操作性检查**（`browser_click`/`browser_type`/`browser_move`）：自身与祖先可见性、
+  零尺寸、pointer-events、disabled、视口外，以及 `elementFromPoint` 命中检测（遮挡）；
+  中心点被盖住在矩形内换 4 个候选点再试。失败返回**确定性原因**而不是静默点空（`force:true` 可跳过）。
+  参考实现两家都**没有**命中检测，这是补它们的缺口。
+- **输入后回读**：`browser_type` 会读回字段值确认"真的进去了"（受控组件回滚/富文本编辑器 reconcile
+  会让"工具报成功、字段其实是空的"），password 只回长度。
+- **人机验证识别**内联进 `browser_snapshot` 的 `challenge` 字段：Cloudflare 拦页 → hCaptcha →
+  reCAPTCHA → Turnstile → 文本双条件兜底；文本采集穿透**同源 iframe 与 shadow DOM**。
+  命中后只做一件事：提示"停下、请人完成、不要反复重试"，并诚实标注这是"基于特征的最佳努力"。
+
+**调用方案做成了 skill**（`skills/browser-automation/SKILL.md`）：19 节的路由表 + 纪律 + 故障处置表 +
+4 个现成剧本。关键实现细节：DSH 的技能发现只扫项目/用户/bundled 三类根目录，**不会**自动发现插件包里的
+`skills/`，所以 `index.js` 自己调 `skills.register`（与已装插件 dsh-video-prompt 同套路），
+并开了 `POST /bl/skills/reload` 让新增技能免重启生效。技能常驻的只有 name+description，
+正文按需加载 —— 21 个工具不该配一份常驻长文。
+
+测试：新增 `tools/verify-page-fns.mjs`（**真起无头 Chromium**，CDP 直连，本地 fixture 页面）96 条断言 ——
+页面侧函数吃真 DOM（getComputedStyle/elementFromPoint/innerText/shadow），替身测出来的绿是假绿。
+它当场抓出三个真缺陷：Markdown 围栏只给 2 个反引号（Markdown 里根本不是代码块，且内容自带 ``` 时会破）、
+`<aside>` 的剥离被我自己写的豁免条件绕过、pointer-events 检查把元素自己当成了"祖先"。
+`verify-host.mjs` 增加 12 条：技能必须真被注册上去（name/description/正文/provider/invocation/资源目录），
+以及重扫路由的 GET/POST 语义。
+
+另修两处**与本功能无关、但本机一直红**的测试环境假设（改动前 HEAD 上同样失败，已用 worktree 复现取信）：
+`verify-host` 断言"18 个工具"已随版本更新为 21；三条断言原本假设"本机没有可启动的 Chromium"，
+本机装了 Edge 就会误报，改成按能力分两支断言（两支都照常断言、标签写明走了哪支），
+并在末尾把真启动的浏览器关掉，免得跑一次测试在机器上留一个窗口/进程。
+
 ## 0.9.2 — 修 v0.3.2「新开标签页」的竞态：附加调试器时页面还是 about:blank
 
 起因：用户重载扩展后实测 `browser_open {use:"edge", newTab:true}` 仍报「站点未授权：该页面」。

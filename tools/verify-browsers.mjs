@@ -116,7 +116,7 @@ await mod.apply(ctx, { userBridge: false })
 console.log('多浏览器（Chrome + Edge 同时接入，两台浏览器各自独立 realm）')
 
 // 只检查"调用被路由到哪台"，返回值语义由 verify-host / verify-extension 各自覆盖
-ok(tools.size === 18, '18 个 browser_* 工具已注册（use 参数是统一注入的）', String(tools.size))
+ok(tools.size === 21, '21 个 browser_* 工具已注册（use 参数是统一注入的）', String(tools.size))
 const useProp = tools.get('browser_navigate').parameters?.properties?.use
 ok(!!useProp && /edge/i.test(useProp.description || ''), '每个工具都注入了 use 参数（可在同一会话里切到另一台）')
 
@@ -225,7 +225,7 @@ const edgeNew = JSON.parse(await tools.get('browser_tabs').execute({ use: 'edge'
 ok(edgeNew.tabs?.length === 1 && edgeNew.tabs[0].url === 'https://edge2.test/p', '重连后的 Edge 槽指向新连接（新标签页）', JSON.stringify(edgeNew.tabs))
 
 // ---------------------------------------------------------------- 收尾
-ok(tools.size === 18, '收尾自检：工具表仍是 18 个（没被中途替换）', String(tools.size))
+ok(tools.size === 21, '收尾自检：工具表仍是 21 个（没被中途替换）', String(tools.size))
 await callRoute('/bl/settings.json', { method: 'PUT', body: { userBridge: false } })
 await sleep(200)
 await edge2.stop()

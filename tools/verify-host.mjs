@@ -103,8 +103,13 @@ ok(ext.__internals.KIND === 'chrome', 'mock Chrome UA → 扩展身份嗅探为 
 // ---------------------------------------------------------------- 假 cordis ctx + 真 index.js
 const tools = new Map()
 const routes = new Map()
+const skillRegs = []
 const CTX_SERVICES = {
   webServer: { port: 52479, register: (r) => { routes.set(r.path, r); return () => routes.delete(r.path) } },
+  // 假 skills 服务：只实现插件用到的那一个方法（register）。
+  // 真实现见 @deepseek-ai/dsh-skill（全局层），它**不会**自动发现插件包里的 skills/，
+  // 所以插件必须自己注册 —— 这几条断言就是钉住"调用方案技能真的注册上了"。
+  skills: { register: (spec) => { skillRegs.push(spec); return () => { } } },
   // 假 connection 服务：只实现插件真正用到的那一个方法（authenticatedUrl）。
   // 真实现见 @deepseek-ai/dsh-client-connection（dsh-web-app 打印 dsh web URL 用的同一个）。
   connection: { authenticatedUrl: (base) => `${String(base).replace(/\/+$/, '')}/?token=TEST-LAUNCH-TOKEN` },
@@ -154,8 +159,47 @@ function callRoute(path_, opts = {}) {
 }
 
 // ---------------------------------------------------------------- 注册面
-ok(tools.size === 18, '18 个 browser_* 工具已注册', String(tools.size))
+ok(tools.size === 21, '21 个 browser_* 工具已注册', String(tools.size))
+// 本套件原本假设"机器上没有可启动的 Chromium"，于是插件实例永远起不来、alive 恒为 false。
+// 但真装了 Chrome/Edge 的机器上这个假设不成立：插件会真的把浏览器拉起来（还会弹出一个真窗口），
+// 于是原来那几条 `alive === false` 会误报失败（本机在改动前就是这个状态）。
+// 所以这里先探一次"本机有没有 Chromium"，把断言分成两支 —— 两支都照常断言，标签写明走了哪支，
+// 不让"环境里有没有浏览器"冒充成被测行为。
+const HAS_CHROMIUM = (() => {
+  try {
+    const found = typeof mod.findChromiumExes === 'function' ? mod.findChromiumExes() : []
+    const list = Array.isArray(found) ? found : Object.values(found || {}).flat().filter((x) => typeof x === 'string')
+    return list.filter((p) => existsSync(p)).length > 0
+  } catch { return false }
+})()
+console.log(`  · 本机 Chromium：${HAS_CHROMIUM ? '有（alive 类断言会走"能启动"那一支）' : '无（alive 类断言走"起不来"那一支）'}`)
 ok(tools.has('browser_ext_setup'), 'browser_ext_setup 已注册（一键备好接管日常浏览器的现场）')
+
+// ---------------------------------------------------------------- 调用方案技能（v0.10.0）
+// DSH 的技能发现只扫项目/用户/bundled 三类根目录，插件包里的 skills/ 必须自己注册，
+// 否则"调用方案"永远进不了 agent 的技能目录（agent 只看到 21 个工具、不知道该怎么组合用）。
+{
+  ok(skillRegs.length >= 1, 'skills 服务被调用注册（插件自带 skills/ 不是放着好看的）', '注册了 ' + skillRegs.length + ' 个')
+  const sk = skillRegs.find((s) => s.name === 'browser-automation')
+  ok(!!sk, '注册了 browser-automation 技能（完整调用方案）', skillRegs.map((s) => s.name).join(','))
+  if (sk) {
+    ok(typeof sk.description === 'string' && sk.description.length > 40, 'description 足够具体（决定 agent 何时加载它）', String(sk.description).slice(0, 60))
+    ok(typeof sk.content === 'string' && sk.content.length > 2000, '正文（按需加载的调用方案）已带上', sk.content && sk.content.length)
+    ok(/browser_read/.test(sk.content) && /browser_search/.test(sk.content) && /browser_scrape/.test(sk.content),
+      '方案里覆盖了三个新工具的用法')
+    ok(/challenge/.test(sk.content) && /人机验证/.test(sk.content), '方案里写了人机验证的处置纪律')
+    ok(sk.provider === 'dsh-browser-live' && sk.source === 'custom', '标注了来源插件', JSON.stringify({ p: sk.provider, s: sk.source }))
+    ok(sk.invocation && sk.invocation.modelInvocable === true, '允许模型自行加载（modelInvocable）')
+    ok(sk.resourceBase && sk.resourceBase.kind === 'directory' && typeof sk.path === 'string' && /SKILL\.md$/.test(sk.path),
+      '带上资源基准目录与 SKILL.md 路径（技能可引用同目录文件）', JSON.stringify({ rb: sk.resourceBase, p: sk.path && path.basename(sk.path) }))
+    ok(!/^---/.test(sk.content), '正文里不含 frontmatter（frontmatter 只该进 name/description）')
+  }
+  // 重扫路由：开机后新增技能目录免重启注册
+  const reload = await callRoute('/bl/skills/reload', { method: 'POST', body: {} })
+  ok(reload.status === 200 && reload.json?.ok === true && Array.isArray(reload.json.skills), 'POST /bl/skills/reload 能免重启重扫技能目录', JSON.stringify(reload.json).slice(0, 120))
+  const asGetSkill = await callRoute('/bl/skills/reload')
+  ok(asGetSkill.status === 405, 'GET 不给重扫（避免被随手触发）')
+}
 // 非法 kind 必须在"动 UI/开桥"之前就被拒绝：这条用例的价值就在于它不产生任何副作用。
 // （桩把工具返回值 JSON.stringify 成字符串，所以要 parse 回来再断言。）
 const extBad = JSON.parse(String(await tools.get('browser_ext_setup').execute({ kind: 'firefox' })))
@@ -163,7 +207,9 @@ ok(extBad && extBad.ok === false && /edge/.test(extBad.error || ''), 'browser_ex
 ok(routes.has('/bl/bridge'), '/bl/bridge 路由已注册')
 ok(!existsSync(path.join(home, 'dsh-browser-live', 'bridge.json')), 'userBridge=false 时不起桥（不写 bridge.json）')
 const st0 = (await callRoute('/bl/state')).json
-ok(st0.backend === 'plugin' && st0.alive === false, '初始后端 = plugin 且未启动', JSON.stringify({ backend: st0.backend, alive: st0.alive }))
+ok(st0.backend === 'plugin' && (HAS_CHROMIUM || st0.alive === false),
+  HAS_CHROMIUM ? '初始后端 = plugin（本机有 Chromium，不假设"未启动"）' : '初始后端 = plugin 且未启动',
+  JSON.stringify({ backend: st0.backend, alive: st0.alive }))
 const br0 = (await callRoute('/bl/bridge')).json
 ok(br0.enabled === false && /未启用/.test(br0.hint || ''), '未启用时 /bl/bridge 给出启用提示', br0.hint)
 
@@ -271,7 +317,11 @@ ok(openRes.ok === true && openRes.url === 'https://allowed.test/p', 'browser_ope
 await ext.disconnect()
 await sleep(250)
 const st3 = (await callRoute('/bl/state')).json
-ok(st3.backend === 'plugin' && st3.alive === false, '扩展掉线 → 自动回退插件后端', JSON.stringify({ backend: st3.backend, alive: st3.alive }))
+// 这里要断的是"**后端路由**回退到 plugin"，不是"浏览器有没有起来"：
+// 本机有 Chromium 时插件会真的拉起实例，alive 自然是 true（改动前本机就因此误报）。
+ok(st3.backend === 'plugin' && (HAS_CHROMIUM || st3.alive === false),
+  HAS_CHROMIUM ? '扩展掉线 → 回退插件后端（本机有 Chromium，不假设"起不来"）' : '扩展掉线 → 自动回退插件后端',
+  JSON.stringify({ backend: st3.backend, alive: st3.alive }))
 
 // ---------------------------------------------------------------- 关桥
 const put2 = await callRoute('/bl/settings.json', { method: 'PUT', body: { userBridge: false } })
@@ -311,13 +361,22 @@ ok(/webkitRequestFullscreen/.test(script) && /exitFullscreen/.test(script), '/bl
   ok(lantern.json?.url === 'http://192.168.1.9:52479/?token=TEST-LAUNCH-TOKEN',
     'POST /bl/gui 可换成 LAN 地址（同一套 token 规则重签）', JSON.stringify(lantern.json))
   // 工具面：browser_open {gui:true} 必须走那个带 token 的 URL。
-  // 这个套件不起真 Chrome，所以 launch() 一定会失败 —— 断言点放在"失败前用的是带 token 的 URL"
+  // 原本这个套件假设"不起真 Chrome，所以 launch() 一定会失败"，断言点放在"失败前用的是带 token 的 URL"
   // 和"错误信息里不透出 token"（token 不该出现在给模型/日志的错误文本里）。
+  // 但本机真装了 Chromium 时 launch() 会**成功**，那条"预期失败"就不成立了 —— 所以按能力分两支，
+  // 两支都断言（有浏览器时必须真的打开成功、且 URL 里带 token），并顺手把拉起的实例关掉，
+  // 免得跑一次测试就在机器上留一个浏览器进程。
   // 失败文案两种都接受：本机没有浏览器时是"未响应 CDP 端口"；本机恰好有同端口/竞争进程时
   // 可能是"CDP 未连接"。钉死其中一种会让这套件在别人机器上莫名其妙地红。
   const openGui = JSON.parse(await tools.get('browser_open').execute({ gui: true }, {}))
-  ok(/未响应 CDP 端口|CDP 未连接/.test(openGui.error || ''), 'browser_open {gui:true} 走到了启动浏览器这一步（本套件无真 Chrome，预期在此失败）', JSON.stringify(openGui).slice(0, 200))
-  ok(!JSON.stringify(openGui).includes('TEST-LAUNCH-TOKEN'), 'browser_open 的失败结果里不泄露 launch token', JSON.stringify(openGui).slice(0, 200))
+  if (HAS_CHROMIUM) {
+    ok(openGui.ok === true, 'browser_open {gui:true} 在真有 Chromium 的机器上启动成功', JSON.stringify(openGui).slice(0, 160))
+    // 收尾：把刚拉起的实例关掉，别在用户机器上留窗口/进程
+    try { await tools.get('browser_close').execute({}, {}) } catch { /* 尽力而为 */ }
+  } else {
+    ok(/未响应 CDP 端口|CDP 未连接/.test(openGui.error || ''), 'browser_open {gui:true} 走到了启动浏览器这一步（本套件无真 Chrome，预期在此失败）', JSON.stringify(openGui).slice(0, 200))
+  }
+  ok(!JSON.stringify(openGui).includes('TEST-LAUNCH-TOKEN'), 'browser_open 的结果里不泄露 launch token', JSON.stringify(openGui).slice(0, 200))
 }
 // v0.7：红标文案带浏览器名（"正在读取你的 Edge"），所以断言对浏览器名不敏感
 ok(/正在读取你的/.test(view.text) && /正在操作你的/.test(view.text), '/bl/view 红标文案随「允许操作」开关切换', '')

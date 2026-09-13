@@ -100,16 +100,19 @@ node tools/verify-audit-chain.mjs   # 期望 0 = 链完整（还没留痕时会�
 | `browser_open` | 启动/接管浏览器（懒启动），可选 url / newTab / `use` |
 | `browser_ext_setup` | **一键备好"接管你日常浏览器"的现场**：开桥（`userBridge=true`）→ token 进剪贴板 → 打开目标浏览器的扩展页 → 资源管理器里打开 `extension/` 目录，并把步骤列出。`kind` 选 `edge`/`chrome`，`open:false` 只返回路径与 token |
 | `browser_navigate` | 导航并等加载完成 |
-| `browser_snapshot` | 结构化快照：可见交互元素清单（ref 编号+坐标）+ 正文节选。**点击前先拿 ref** |
-| `browser_click` | ref / CSS selector / 坐标三选一，真实鼠标事件（右键、双击可选）；**默认走拟人贝塞尔轨迹**（`instant:true` 可瞬移） |
-| `browser_move` | 拟人移动鼠标（触发 :hover/下拉/tooltip）；`hold` 按住左键、`instant` 瞬移 |
-| `browser_type` | 聚焦输入框（自动全选便于替换）+ 插入文本，可回车 |
+| `browser_snapshot` | 结构化快照：可见交互元素清单（**跨快照稳定的 ref**、role、文本、坐标、状态标记）+ 正文节选。重名元素带 `ctx` 消歧；页面上有人机验证时结果里会带 `challenge`。**点击前先拿 ref** |
+| `browser_click` | ref / CSS selector / 坐标三选一，真实鼠标事件（右键、双击可选）；**默认走拟人贝塞尔轨迹**（`instant:true` 可瞬移）。用 ref/selector 时**先做可操作性检查**（隐藏/零尺寸/disabled/pointer-events/视口外/被遮挡），失败返回确定性原因而不是静默点空（`force:true` 可跳过） |
+| `browser_move` | 拟人移动鼠标（触发 :hover/下拉/tooltip）；`hold` 按住左键、`instant` 瞬移；同样带遮挡/可见性检查 |
+| `browser_type` | 聚焦输入框（自动全选便于替换）+ 插入文本，可回车；**输入后回读字段值**确认真的写进去了（password 只回长度，不回显） |
+| `browser_read` | **读当前页的结构化内容**（v0.10.0）：自动识别正文主体、输出 Markdown（标题/列表/表格/代码块/链接）、附元信息与链接清单；offset/limit 是**段落感知**的，长文续读不会把句子劈开 |
+| `browser_scrape` | **把重复结构抓成行数据**（v0.10.0）：`item` + `fields`（`"a@href"` 取链接并绝对化），不用写 JS |
+| `browser_search` | **在浏览器里真搜**（v0.10.0）：Bing/百度/DDG → 结构化结果；被反爬拦会自动换引擎并如实回报原因 |
 | `browser_upload` | 本机文件塞进 `<input type=file>`（不弹系统对话框）；ref/selector 可指上传按钮/拖拽区容器，自动解析其中隐藏 input（Meta Ads 等 React 自定义上传组件适用）；触发 change 事件 |
 | `browser_press` | 按键/组合键：`Enter`、`ctrl+a`、`alt+ArrowLeft`… |
 | `browser_scroll` | 滚轮方向+像素 |
 | `browser_wait` | 等文本出现 / 选择器命中 / URL 片段 / 纯等待，带超时 |
 | `browser_eval` | 页内 JS 表达式（returnByValue + await 可选） |
-| `browser_text` | 正文分块提取（比快照省 token） |
+| `browser_text` | 正文分块提取（**纯字符切片**；要结构就用 `browser_read`） |
 | `browser_screenshot` | 可视区/整页 PNG 落盘，路径可直接交给读图工具 |
 | `browser_tabs` | 标签页 list/new/select/close |
 | `browser_history` | 前进/后退/刷新（可强刷） |
@@ -121,6 +124,36 @@ node tools/verify-audit-chain.mjs   # 期望 0 = 链完整（还没留痕时会�
 不写 `use` = 沿用上一次调用用的那台。
 
 所有工具串行互斥（一次只跑一个）；首次调用自动拉起浏览器并弹观察窗。
+
+## 网页理解与搜索（v0.10.0）：读得懂、抓得到、搜得了
+
+v0.10.0 从 7 个同类 MIT 插件里蒸馏出三个工具，**没有新增任何 npm 依赖**（全部靠注入脚本 + 现有 CDP 通道）：
+
+| 工具 | 它解决什么 | 关键实现 |
+|---|---|---|
+| `browser_read` | 读一篇文章/一个页面 | 四级正文降级（多 `article` ≥200 字 → `role=main` → `main` → 最大文本块）、噪音剥离、Markdown 输出、**段落感知截断**、meta/og/JSON-LD 元信息、链接清单、标题大纲 |
+| `browser_scrape` | 把列表/表格/搜索结果抓成行数据 | `item` + `fields`（`"h3 a@href"` 取链接并绝对化、`@html`、`@text`），命中不到时自适应重试 |
+| `browser_search` | 在浏览器里真搜 | Bing/百度/DDG HTML → 结构化条目；跳转链解包、URL 归一化去重、**三态空结果判定**、引擎冷却 |
+
+**为什么"在浏览器里搜"而不是发 HTTP 请求**：用的是你自己浏览器已授权的身份，比服务端抓取更少遇到
+反爬；且被拦时能**区分**三种情况并分别处置 —— `blocked`（换引擎 + 冷却 30s）、
+`not-loaded`（等 1.5s 重试一次）、`layout-changed`（引擎改版，选择器要更新，别硬试）。
+刻意不用 Google（同意页/验证码在真浏览器里一样中招）、不用 Bing RSS（浏览器里打开会变成 XML 视图）、
+不用公共 SearXNG 的 `format=json`（多数实例已关闭）。
+
+**为什么不做成"自带行动循环的 agent"**：循环是 DSH agent 自己的事。这里只把"看得懂"和"抓得到"补上，
+再用一份**调用方案**告诉 agent 怎么组合。所以：
+
+- `skills/browser-automation/SKILL.md` = 完整调用方案（19 节：决策表 → 浏览器档位 → 观察/行动循环 →
+  ref 与状态标记 → **故障处置表** → 读/抓/搜的用法 → 人机验证纪律 → 反模式清单 → 4 个现成剧本 → 验收口径）。
+- DSH 的技能发现**不会**自动扫插件包里的 `skills/`，所以 `index.js` 自己调 `skills.register` 注册
+  （`POST /bl/skills/reload` 可免重启重扫新增技能）。技能真正常驻的只有 name + description，
+  正文在 agent 调 `skill` 时才进上下文 —— **21 个工具不该配一份常驻长文**。
+- 人机验证、被遮挡、ref 失效这些"卡住"的情形，都做成**工具返回值里的一等公民**
+  （`challenge` / `flags.covered-by` / 确定性错误原因），而不是让 agent 自己猜。
+
+验证：`node tools/verify-page-fns.mjs`（**真起无头 Chromium**，本地 fixture 页面，96 条断言）；
+技能注册与重扫路由的断言在 `node tools/verify-host.mjs` 里（12 条）。`npm test` 全绿。
 
 ## 拟人轨迹（v0.3.0）
 
@@ -340,6 +373,18 @@ host(index.js) ──WS──> 扩展（extension/, MV3，Chrome 和 Edge 各装
 
 ## 版本与变更记录
 
+- **v0.10.0**：**「读得懂、抓得到、搜得了」+ 把调用方案做成技能** —— 从 7 个同类 MIT 插件（生态索引里
+  找的真实等价物；用户给的那 4 个 URL 六条路径全 404）蒸馏出 `browser_read`（正文四级降级 + 噪音剥离 +
+  Markdown + **段落感知截断**）、`browser_scrape`（`item`+`fields` 结构化抓取）、`browser_search`
+  （真实浏览器里搜 Bing/百度/DDG，跳转链解包 + 三态空结果判定 + 引擎冷却），**零新增依赖**；
+  同时修三处观察/动作层短板：**ref 跨快照稳定**（原来每次快照重排编号，"上次的 ref=7" 在页面重排后
+  会点到**另一个元素**）、快照内联状态并做**交互恢复**（React 的 onClick 是事件委托，DOM 上没有 onclick
+  属性，只按选择器收元素会漏掉一大片真按钮）、点/输入前做**可操作性检查**（含 `elementFromPoint`
+  遮挡检测 —— 参考实现两家都没有）与输入后**回读校验**；`browser_snapshot` 里内联人机验证识别
+  （Cloudflare/hCaptcha/reCAPTCHA/Turnstile/文本兜底），命中就停下问人。
+  调用方案落成 `skills/browser-automation/SKILL.md`（DSH 不会自动发现插件包里的 skills/，
+  由 `index.js` 调 `skills.register` 注册 + 免重启重扫路由）。新增 96 条真浏览器断言；
+  另修两处与本功能无关、但本机一直红的测试环境假设（改动前 HEAD 同样失败，已用 worktree 取信）。
 - **v0.8.3**：**「不动你正在看的页面」＋「Chrome 起不来不是提权，是安全软件拦了 GPU 沙箱」** ——
   ① 接管你的浏览器时，"当前页未授权、目标站已授权"不再**就地导航**（那会把你正在读的页面换掉），
   改成 **`chrome.tabs.create` 新开一个标签页**、附加到新标签页，你原来的页面一个字都不动；
@@ -573,8 +618,20 @@ host(index.js) ──WS──> 扩展（extension/, MV3，Chrome 和 Edge 各装
 - **灵感来源（原作者）**：[dsh-ego-browser](https://github.com/Fisfzy/dsh-ego-browser)，
   MIT © **Fisfzy** and dsh-ego-browser contributors。其"把 agent 接进 DSH 的真浏览器 + 观察窗"
   设计（含 ego-lite 运行时，© CitroLabs / ego-lite contributors，MIT）证明了这条路走得通。
-- 本仓库是**独立自研的干净实现（clean-room re-implementation）**：不含 ego-browser / ego-lite 的任何一行代码，
-  不携带其运行时 vendored 源码，仅借鉴其功能思路与交互范式。商标与名称归各自所有者。
+- **v0.10.0 蒸馏来源**（均 MIT；页面侧算法全部按浏览器 DOM 独立重写，搜索引擎 URL/选择器与
+  验证码特征属事实性数据）：[dsh-read-url](https://github.com/2672243194/dsh-read-url)
+  （正文降级顺序 / 链接密度阈值 / 段落感知截断 / Markdown walker 细节 / JSON-LD 兜底）、
+  [wqty123/dsh-browser](https://github.com/wqty123/dsh-browser)（`选择器@属性` 抓取约定 /
+  人机验证特征集与判定顺序）、[Lum1104/dsh-browser](https://github.com/Lum1104/dsh-browser)
+  （WeakMap 稳定编号 / 无障碍名字优先级 / 输入后回读 / 页面内容按不可信数据处理）、
+  [Tencent/BrowserSkill](https://github.com/Tencent/BrowserSkill)（技能即调用方案的组织骨架）、
+  [modsearch](https://github.com/liustack/modsearch) · [dsh-free-search](https://github.com/DDWDUC/dsh-free-search) ·
+  [dsh-web-search-pro](https://github.com/anweat/dsh-web-search-pro)（引擎 URL 与选择器 / 空结果三态判定 / 冷却）。
+- 本仓库是**独立自研的重实现**：不含 ego-browser / ego-lite 的任何一行代码，不携带其运行时 vendored 源码。
+  v0.10.0 起为诚实起见，`NOTICE` 里明确声明了两类"不是纯概念借鉴"的东西：**事实性数据**
+  （引擎 URL、SERP 选择器、验证码特征）与**按 DOM 重写的算法**（页面侧函数），并附上各自的 MIT 许可全文。
+- 上游未采用的部分也写清楚：`dsh-read-url` 的可选 `@mozilla/readability` 升级路径是 **MPL-2.0**，
+  本插件**不引入任何 npm 依赖**，所以那条路直接关闭（好消息是那些判定逻辑本就是它的自研零依赖部分）。
 
 感谢 ego-browser 作者把"接进 DSH 的 agent 浏览器 + 观察窗"这条路趟通。
 完整署名与上游声明见仓库根目录 [`NOTICE`](./NOTICE) 文件。

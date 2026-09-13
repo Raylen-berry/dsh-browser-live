@@ -2,8 +2,21 @@ dsh-browser-live
 Copyright (c) 2026 Raylen-berry
 SPDX-License-Identifier: MIT
 
-This product is an independent, clean-room re-implementation. It contains no
-source code from the projects below; it only references their concepts.
+This product is an independent re-implementation. It contains no source code
+copied from the projects below; it references their concepts, and re-implements
+the algorithms it borrows in a different runtime (page-side DOM walkers driven
+over CDP instead of Node-side HTML regexes). Two exceptions are declared
+explicitly and honestly, because "clean-room, concepts only" would no longer be a
+true statement after v0.10.0:
+
+  1. Factual data — search-engine URL templates, SERP CSS selectors, and
+     human-verification marker patterns (ids / classes / iframe URLs) were taken
+     from the search & reading plugins listed below. These are facts about
+     third-party web pages, not creative code, but they are attributed here.
+  2. Idea-level ports — the page-side algorithms in page-read.js (main-content
+     selection order, link-density threshold, paragraph-aware truncation,
+     Markdown walker details, stable element refs, captcha triage) are
+     independent DOM re-implementations of ideas found in those projects.
 
 Design inspiration — the capability set (agent-driven real browser + live
 watch-over panel with human takeover) was pioneered by:
@@ -16,6 +29,65 @@ which in turn vendors the ego-lite browser runtime:
 
   ego-lite
   Copyright CitroLabs / ego-lite contributors  (MIT License)
+
+v0.10.0 (web reading / structured scraping / in-browser search / human-verification
+triage / calling-convention skill) distilled from these — all MIT:
+
+  2672243194/dsh-read-url
+  Copyright (c) 2026 dsh-read-url contributors
+  https://github.com/2672243194/dsh-read-url  (MIT License)
+  → main-content pick order, link-density threshold, noise blacklist,
+    paragraph-aware truncation, Markdown walker details, JSON-LD fallbacks.
+    (Its optional @mozilla/readability upgrade path is MPL-2.0 and was
+    deliberately NOT used: this plugin adds no npm dependencies.)
+
+  wqty123/dsh-browser (package name: dsh-builtin-browser)
+  Copyright (c) 2026 dsh-browser contributors
+  https://github.com/wqty123/dsh-browser  (MIT License)
+  → `field -> "selector@attr"` scraping convention; human-verification marker
+    set and its triage order; the "a clean result is not a guarantee" caveat.
+
+  Lum1104/dsh-browser
+  Copyright (c) 2026 Yuxiang Lin
+  https://github.com/Lum1104/dsh-browser  (MIT License)
+  → stable element ids via WeakMap (never reused; stale refs fail loudly instead
+    of pointing at a different element), accessible-name priority chain (never
+    expose an input's value as its name, never echo password values), post-typing
+    value read-back, and framing returned page text as untrusted data.
+
+  Tencent/BrowserSkill
+  Copyright (c) 2026 Tencent
+  https://github.com/Tencent/BrowserSkill  (MIT License)
+  → the skill-as-calling-convention structure (read-escalation ladder, one
+    observable goal per step, per-failure recovery table, executable
+    anti-patterns) that skills/browser-automation/SKILL.md is modelled on.
+
+  liustack/modsearch  ·  DDWDUC/dsh-free-search  ·  anweat/dsh-web-search-pro
+  Copyright (c) 2026 their respective contributors  (MIT License)
+  → browser-usable search-engine URLs and selectors, the three-way empty-result
+    triage (blocked / not-loaded / layout-changed), per-engine cooldown, and the
+    deliberate rejections (no Google, no Bing RSS, no SearXNG json endpoint).
+
+The MIT License text below applies to each copyright holder listed above, for the
+portions attributed to them:
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in
+  all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
 
 Attribution is given out of respect for the original authors' work.
 Trademarks and product names belong to their respective owners.
