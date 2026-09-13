@@ -17,7 +17,7 @@
 // 得把日志实时送到 agent 够不到的另一个人/进程/机器上。
 // ============================================================================
 
-import { appendFileSync, mkdirSync, readFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, openSync, closeSync, fstatSync, readSync, readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 
@@ -30,7 +30,7 @@ export const auditFileName = (d = new Date()) => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
 }
 
-export function createAudit(baseDir, { maxArgChars = 4000, maxResChars = 1500, now = () => new Date() } = {}) {
+export function createAudit(baseDir, { maxArgChars = 4000, maxResChars = 1500, now = () => new Date(), tailBytes = 16384 } = {}) {
   let day = ''
   let prev = null
   let writes = 0
@@ -39,25 +39,43 @@ export function createAudit(baseDir, { maxArgChars = 4000, maxResChars = 1500, n
 
   const fileFor = (d) => path.join(baseDir, d + '.jsonl')
 
-  /** 续写已有文件时，把链尾接上（否则重启后第一条的 prev 会是 null、链看起来断了）。 */
+  /** 读文件最后一行的 h（只读文件末尾 tailBytes，避免大文件整读）。读不到就 null。 */
   function tailHash(file) {
+    let fd
     try {
-      const txt = readFileSync(file, 'utf8')
-      const i = txt.lastIndexOf('\n', txt.length - 2)
-      const last = txt.slice(i + 1).trim()
+      fd = openSync(file, 'r')
+      const size = fstatSync(fd).size
+      if (!size) return null
+      const len = Math.min(size, tailBytes)
+      const buf = Buffer.allocUnsafe(len)
+      readSync(fd, buf, 0, len, size - len)
+      const txt = buf.toString('utf8')
+      // 末尾可能正好是 '\n'（正常情况）：先砍掉，再取最后一行
+      const trimmed = txt.endsWith('\n') ? txt.slice(0, -1) : txt
+      const i = trimmed.lastIndexOf('\n')
+      const last = trimmed.slice(i + 1).trim()
       if (!last) return null
       const rec = JSON.parse(last)
       return typeof rec.h === 'string' ? rec.h : null
-    } catch { return null }
+    } catch { return null } finally { if (fd !== undefined) { try { closeSync(fd) } catch { /* ignore */ } } }
   }
 
   /** 写一条。type 建议用 'tool' / 'nav' / 'boot' / 'note'。永不抛错。
    *  `h` = 本条内容（不含 h 本身）的 hash，**既写进文件也返回** —— 写进文件是为了
-   *  第二天/重启后续写时能把链接上（离线自检抓到过"只返回不落盘"导致链断的 bug）。 */
+   *  第二天/重启后续写时能把链接上（离线自检抓到过"只返回不落盘"导致链断的 bug）。
+   *
+   *  **链尾以文件为准，不信内存**（v0.12.0 修）：原来只在"跨天"时才读一次文件尾，
+   *  同一天里默认内存里的 prev 是对的 —— 但同一天里可能有**第二个写入者**：
+   *  2026-09-14 实测踩到，插件被重新 apply 后旧实例的 AUDIT 仍在写（DSH 的插件生命周期），
+   *  于是两条线各自记着自己的链尾，第 16 行接回了第 14 行 ⇒ 链断。
+   *  这不是"谁把行删了"，却和删行长得一模一样（这正是哈希链不该误报的地方）。
+   *  现在每次写之前都读一次文件尾（只读末尾 16KB），prev 是**文件的事实**而不是进程的记忆。 */
   function audit(type, data = {}) {
     try {
       const d = auditFileName(now())
-      if (d !== day) { day = d; prev = tailHash(fileFor(d)) }
+      if (d !== day) { day = d; prev = null }
+      const tail = tailHash(fileFor(d))
+      if (tail !== prev) prev = tail
       const rec = { t: now().toISOString(), type, ...data, prev }
       const h = lineHash(JSON.stringify(rec))
       mkdirSync(baseDir, { recursive: true })

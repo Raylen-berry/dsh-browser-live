@@ -541,6 +541,17 @@ export function searchPageInPage(spec) {
   var limit = Math.max(1, Math.min(Number(spec.limit) || 10, 50))
   function trimmed(s) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim() }
 
+  /** 归一化主机名：剥 www、小写；既接受完整 URL 也接受裸主机名（spec.selfHost 可能是后者）。 */
+  function normHost(v) {
+    var s = String(v || '').trim()
+    if (!s) return ''
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) {
+      try { return new URL(s).hostname.replace(/^www\./, '').toLowerCase() } catch (e) { return '' }
+    }
+    var h = s.replace(/\/.*$/, '').replace(/^www\./, '').toLowerCase()
+    return /^[a-z0-9.-]+$/.test(h) ? h : ''
+  }
+
   // 跳转链解包：一层就够（实测 ddg/bing/baidu 都只包一层），但保留可读的原始 href。
   function unwrap(href) {
     if (!href) return ''
@@ -574,24 +585,30 @@ export function searchPageInPage(spec) {
     if (!a) continue
     var url = unwrap(a.getAttribute('href') || a.href || '')
     if (!/^https?:/i.test(url)) continue
-    // 引擎自家的内链（"图片"、"更多结果"、"设置"）不是结果；但**引擎的跳转链是结果**，必须留。
-    // v0.10.0 联网实测踩到：百度结果的标题链接是 http://www.baidu.com/link?url=<加密串>，
-    // 而这里原来写的是 /\/url$|\/link$/（要求"以 /link 结尾"）—— 带查询参数就匹配不上，
-    // 于是 8 条结果被这条守卫全部丢掉，工具却报成"引擎改版了"，很容易把人引到"去改选择器"的错路上。
-    var hu = ''
-    try { hu = new URL(url).hostname.replace(/^www\./, '') } catch (e) { hu = '' }
-    var engineHost = /(^|\.)(bing|baidu|duckduckgo|google|microsoft|msn)\./.test(hu)
+    // 引擎自家的内链（"图片"、"更多搜索结果"、"设置"、**相关搜索**）不是结果；
+    // 但引擎的**跳转链**是结果，必须留（百度/搜狗的 link?url=<加密串> 就是这种）。
+    //
+    // v0.10.0 实测踩到过两次，都在这一小段上：
+    //   ① 原来写 /\/url$|\/link$/（要求"以 /link 结尾"）—— 带查询参数匹配不上，百度 8 条结果被全杀；
+    //   ② 判定"是不是引擎自家"用的是**写死的引擎域名清单** —— 搜狗不在清单里，于是它自己的
+    //      "相关搜索"内链（sogou.com/web?query=…）被当成结果混进来了。
+    // 所以改成**与引擎无关**的判据：拿链接域名跟"当前这个搜索页自己的域名"比（归一化掉 www），
+    // 只有跳转链形态才放行。自定义引擎（engineSpec / settings.search.engines）也自动适用。
+    var selfHost = normHost(spec.selfHost || location.hostname)
+    var hu = normHost(url)
+    var isOwnHost = !!selfHost && hu === selfHost
+    var isKnownEngineHost = /(^|\.)(bing|baidu|duckduckgo|google|microsoft|msn)\./.test(hu + '.')
     var isRedirect = /[\/?](url|link|redirect)=|\/url$|\/link$|\/ck\/a|uddg=/.test(url)
-    if (engineHost && !isRedirect) continue
+    if ((isOwnHost || isKnownEngineHost) && !isRedirect) continue
     var tEl = pick(box, spec.title)
     var sEl = pick(box, spec.text)
     var title = trimmed((tEl && (tEl.innerText || tEl.textContent)) || a.innerText || a.getAttribute('aria-label') || '')
     var snippet = trimmed((sEl && (sEl.innerText || sEl.textContent)) || '')
     if (!title && !snippet) continue
     var row = { rank: out.length + 1, title: title.slice(0, 200), url: url, snippet: snippet.slice(0, 400) }
-    // 解不开的跳转链（百度的 link?url= 是加密串，页内解不出来）要如实标注：
+    // 解不开的跳转链（百度/搜狗的 link?url=<加密串>）要如实标注：
     // 否则 agent 会以为拿到的是最终 URL 而直接引用/展示。
-    if (engineHost && isRedirect) row.viaEngineRedirect = true
+    if ((isOwnHost || isKnownEngineHost) && isRedirect) row.viaEngineRedirect = true
     out.push(row)
   }
 

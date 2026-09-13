@@ -414,6 +414,25 @@ console.log('\n[3] SEARCH_FN —— SERP 抽取与归一')
   ok(/条目选择器（item）/.test(mod.searchFailHint([{ engine: 'x', reason: 'layout-changed', hits: 0 }])), 'layout-changed 的建议指向 item')
   ok(/换别的引擎/.test(mod.searchFailHint([{ engine: 'x', reason: 'blocked' }])), 'blocked 的建议指向换引擎')
 
+  // ---- 自定义引擎（不在任何预设里）：夹具照抄 2026-09-14 联网实测到的搜狗结构 ----
+  // 实测抓到两件事：① 搜狗自己的「相关搜索」内链（sogou.com/web?query=…）混进了结果 ——
+  // 因为"引擎自家内链"原来是按**写死的引擎域名清单**判的，搜狗不在清单里；
+  // ② 它的跳转链 sogou.com/link?url=<加密串> 没被标 viaEngineRedirect，同一个原因。
+  // 正解：拿链接域名跟"这个搜索页自己的域名"（selfHost）比，与引擎是谁无关。
+  const sgFile = w('sogou-serp.html', `<!doctype html><html><head><meta charset="utf-8"><title>测试_搜狗搜索</title></head><body>
+<div id="main">
+  <div class="vrwrap"><h3><a href="https://news.qq.com/rain/a/20260814A0BQ9N00">搜狗结果一</a></h3><div class="text-layout">第一条摘要。</div></div>
+  <div class="vrwrap"><h3><a href="https://sogou.com/web?user_ip=1&query=deepseek%E7%BD%91%E9%A1%B5%E7%89%88&bh=1">相关搜索（自家内链，应被过滤）</a></h3></div>
+  <div class="vrwrap"><h3><a href="https://sogou.com/link?url=hedJjaC291P3yGwc7N55kLSc2ls_Ks2xs8iIE0wb5WHe79cTr2raF">搜狗结果二（加密跳转链）</a></h3><div class="text-layout">第二条摘要。</div></div>
+</div></body></html>`)
+  const sgf = await openFixture(sgFile)
+  const sg = await sgf.inject(FNS.SEARCH_FN, [{ item: '#main .vrwrap', link: 'h3 a', title: 'h3', text: '.text-layout', selfHost: 'www.sogou.com', limit: 10 }])
+  ok(sg.count === 2, '自定义引擎：自家「相关搜索」内链被过滤（判据与引擎无关）', JSON.stringify(sg.items.map((x) => x.url)))
+  ok(sg.items.some((x) => /sogou\.com\/link\?url=/.test(x.url)), '自家域名上的**跳转链**保留（它不是内链）')
+  ok(sg.items.find((x) => /sogou\.com\/link/.test(x.url)).viaEngineRedirect === true, '自定义引擎的加密跳转链也被标注', JSON.stringify(sg.items.map((x) => !!x.viaEngineRedirect)))
+  ok(sg.items.every((x) => !/query=deepseek/.test(x.url)), '带 query= 的自家链接不会混进结果')
+  sgf.close()
+
   // 三层空结果判定：先"页面有内容但选择器没命中"（改版），再"反爬拦截"，最后"页面还没加载"
   const af = await openFixture(articleFile)
   const layout = await af.inject(FNS.SEARCH_FN, [{ item: 'li.nope', link: 'a', title: 'a', text: 'p', limit: 5 }])

@@ -47,11 +47,14 @@ window.__ModuleLoader__.load({
       '.bl-fab-ghost::before{content:"";position:absolute;inset:-8px -8px -6px;border-radius:14px;background:rgba(20,18,26,.3);backdrop-filter:blur(7px) saturate(.9);box-shadow:inset 0 0 0 1px rgba(255,255,255,.08)}',
       // 兜底球的层级也走样式表（不写行内）：让位时把 style.zIndex 置空才能回到基值
       '.bl-fab-fallback{position:fixed;left:18px;bottom:18px;z-index:2147483050;box-shadow:0 6px 20px rgba(0,0,0,.22)}',
-      // 宽度改成随视口收缩（2026-09-13）：原来是写死的 560px / 900px，
-      // 在 700px 宽的半屏窗口里 560px 要占掉 80%，必然压住会话区。
-      // 现在全屏仍是 560/900，窄屏自动收窄；max-width 继续兜底。
-      '.bl-panel{position:fixed;right:18px;bottom:18px;z-index:2147483050;width:clamp(300px,42vw,560px);max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);background:var(--dsw-alias-bg-layer-2,#fff);border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.3));border-radius:14px;box-shadow:0 14px 44px rgba(0,0,0,.28);display:flex;flex-direction:column;overflow:hidden;font-size:12px;color:var(--dsw-alias-label-primary,#222)}',
-      '.bl-panel.bl-wide{width:clamp(300px,66vw,900px)}',
+      // 面板几何全部走**视口百分比**（v0.12.0）：宽/高/宽屏宽/边距都是"屏幕的多少"，
+      // 通过 CSS 变量由设置注入（--bl-pw / --bl-ph / --bl-pww / --bl-gap）。
+      // 历史：原来写死 560px/900px —— 2026-09-13 改成 clamp(300px→560px) 那一版仍然有硬上限，
+      // 窗口再宽面板也不再变大，宽屏上反而相对变小，用起来就是"固定尺寸"。现在只有两个兜底：极窄窗口的可读下限 min(280px,90vw)（它自己也随视口缩），以及不越出视口的 max-*。
+      // 高度的同类问题更明显：以前面板高度完全由截图的宽高比决定，窄而高的窗口里会顶穿视口，
+      // 所以现在给 max-height: <ph>vh，舞台 flex:1 + 图片 contain（**照搬独立页 /bl/view 已验证的写法**）。
+      '.bl-panel{position:fixed;right:var(--bl-gap,clamp(10px,1.2vw,22px));bottom:var(--bl-gap,clamp(10px,1.2vh,22px));z-index:2147483050;width:calc(var(--bl-pw,42) * 1vw);min-width:min(280px,90vw);max-width:calc(100vw - 24px);max-height:calc(var(--bl-ph,52) * 1vh);background:var(--dsw-alias-bg-layer-2,#fff);border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.3));border-radius:14px;box-shadow:0 14px 44px rgba(0,0,0,.28);display:flex;flex-direction:column;overflow:hidden;font-size:12px;color:var(--dsw-alias-label-primary,#222)}',
+      '.bl-panel.bl-wide{width:calc(var(--bl-pww,66) * 1vw)}',
       '.bl-panel.bl-snap{transition:left .16s ease,top .16s ease}',
       '.bl-hd{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.2));flex:none;cursor:grab;user-select:none}',
       '.bl-hd.bl-drag{cursor:grabbing}',
@@ -63,10 +66,12 @@ window.__ModuleLoader__.load({
       '.bl-btn.bl-on{background:var(--dsw-alias-interactive-bg-hover,rgba(80,130,220,.16));border-color:#5b8def}',
       '.bl-btn.danger{color:#d0453f;border-color:rgba(208,69,63,.45)}',
       '.bl-tabs{display:flex;gap:4px;padding:6px 8px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.2));overflow-x:auto;flex:none}',
-      '.bl-tab{flex:none;max-width:150px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.25));background:var(--dsw-alias-bg-module-platform,rgba(127,127,127,.08));border-radius:7px;padding:2px 8px;cursor:pointer}',
+      '.bl-tab{flex:none;max-width:min(150px,18vw);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.25));background:var(--dsw-alias-bg-module-platform,rgba(127,127,127,.08));border-radius:7px;padding:2px 8px;cursor:pointer}',
       '.bl-tab.sel{border-color:#5b8def;background:rgba(91,141,239,.14)}',
-      '.bl-stage{position:relative;line-height:0;background:#101418;flex:none}',
-      '.bl-stage img{width:100%;display:block;user-select:none;-webkit-user-drag:none}',
+      // 舞台吃满剩余高度（min-height:0 才允许 flex 子项收缩），图片按比例装进这个盒子并居中 ——
+      // 于是面板高度受 max-height 约束，不再被截图的宽高比牵着走，也不会变形。
+      '.bl-stage{position:relative;line-height:0;background:#101418;flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;overflow:hidden}',
+      '.bl-stage img{max-width:100%;max-height:100%;width:auto;height:auto;display:block;user-select:none;-webkit-user-drag:none}',
       '.bl-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#9aa4b2;line-height:1.5;text-align:center;padding:20px;font-size:12px}',
       '.bl-act{position:absolute;left:8px;bottom:8px;right:8px;background:rgba(10,14,20,.72);color:#dfe6ef;border-radius:8px;padding:3px 8px;font-size:11px;line-height:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none;opacity:0;transition:opacity .25s}',
       '.bl-act.show{opacity:1}',
@@ -74,10 +79,10 @@ window.__ModuleLoader__.load({
       '.bl-ft label{color:var(--dsw-alias-label-secondary,#777);display:inline-flex;align-items:center;gap:4px}',
       '.bl-ft select{border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.3));border-radius:6px;background:transparent;color:inherit;font-size:11px;height:22px}',
       '.bl-dl{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto}',
-      '.bl-dl a{color:#5b8def;text-decoration:none;max-width:160px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border:1px solid rgba(91,141,239,.4);border-radius:6px;padding:1px 7px}',
+      '.bl-dl a{color:#5b8def;text-decoration:none;max-width:min(160px,20vw);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border:1px solid rgba(91,141,239,.4);border-radius:6px;padding:1px 7px}',
       '.bl-key{position:absolute;left:-9999px;width:1px;height:1px;opacity:0}',
       // 收起态：只剩底部一条细把手，基本不挡对话；点它（或 🌐）再展开盖回上层
-      '.bl-panel.bl-min{width:auto;min-width:0;max-width:min(440px,calc(100vw - 24px));border-radius:12px}',
+      '.bl-panel.bl-min{width:auto;min-width:0;max-width:min(calc(var(--bl-pww,66) * 1vw),calc(100vw - 24px));border-radius:12px}',
       '.bl-panel.bl-min .bl-tabs,.bl-panel.bl-min .bl-stage,.bl-panel.bl-min .bl-ft{display:none}',
       '.bl-panel.bl-min .bl-hd{padding:6px 10px;border-bottom:0}',
       '.bl-panel.bl-min .bl-url{max-width:140px}',
@@ -721,6 +726,28 @@ window.__ModuleLoader__.load({
         return true
       } catch (e) { return false }
     }
+    /**
+     * 面板几何：把设置里的**百分比**注入 CSS 变量（v0.12.0）。
+     * 为什么要有这一步：面板原来写死 560px/900px（后来 clamp 到 560px 上限），
+     * 宽屏上窗口再宽它也不变 —— 用起来就是"固定尺寸"。现在面板宽/高/宽屏宽/边距都是
+     * "视口的百分之多少"，改设置立刻生效（不用重启），窄屏由 CSS 里的 min()/max() 兜底。
+     */
+    function applyPanelGeometry(cfg) {
+      if (!cfg || typeof cfg !== 'object') return
+      var root = document.documentElement
+      var set = function (name, v, lo, hi) {
+        if (v === undefined || v === null || v === '') return
+        var n = Number(v)
+        if (!isFinite(n)) return
+        n = Math.min(hi, Math.max(lo, n))
+        root.style.setProperty(name, String(Math.round(n * 10) / 10))
+      }
+      set('--bl-pw', cfg.panelWidthPct, 15, 95)
+      set('--bl-ph', cfg.panelHeightPct, 15, 95)
+      set('--bl-pww', cfg.panelWidePct, 15, 98)
+      S.geom = { pw: Number(cfg.panelWidthPct) || 42, ph: Number(cfg.panelHeightPct) || 52, pww: Number(cfg.panelWidePct) || 66 }
+    }
+
     function fetchSettings() {
       // api() 给的是 Response 不是 JSON —— v0.4.0 这里漏了 .json()，j.liveView 恒为
       // undefined，于是盘上存着 standalone、页面里 S.liveView 仍是 false：地球钮又
@@ -728,7 +755,11 @@ window.__ModuleLoader__.load({
       return api('/bl/settings.json', { cache: 'no-store' })
         .then(function (r) { return r && r.ok ? r.json() : null })
         .then(function (j) {
-          if (j && typeof j === 'object') { S.liveView = j.liveView === 'standalone'; return j }
+          if (j && typeof j === 'object') {
+            S.liveView = j.liveView === 'standalone'
+            applyPanelGeometry(j)          // 面板几何跟着设置走（百分比）
+            return j
+          }
           return null
         }).catch(function () { return null })
     }
@@ -827,6 +858,9 @@ window.__ModuleLoader__.load({
       var proxy = pr[0], setProxy = pr[1]
       var ex = React.useState('')
       var extra = ex[0], setExtra = ex[1]
+      // 面板几何（百分比）：默认值与 DEFAULT_SETTINGS 保持一致
+      var gm = React.useState({ pw: 42, ph: 52, pww: 66 })
+      var geom = gm[0], setGeom = gm[1]
       var note = React.useState('')
       var noteTxt = note[0], setNote = note[1]
       var filled = React.useState(false)
@@ -845,6 +879,8 @@ window.__ModuleLoader__.load({
           if (!j || typeof j !== 'object') return
           setCfg(j)
           S.liveView = j.liveView === 'standalone'
+          applyPanelGeometry(j)
+          setGeom({ pw: j.panelWidthPct || 42, ph: j.panelHeightPct || 52, pww: j.panelWidePct || 66 })
           if (!isFilled) { setProxy(j.proxy || ''); setExtra(j.extraArgs || ''); setFilled(true) }
         })
         loadBridge()
@@ -865,6 +901,8 @@ window.__ModuleLoader__.load({
           .then(function (j) {
             if (j && j.settings) {
               setCfg(j.settings)
+              applyPanelGeometry(j.settings)
+              setGeom({ pw: j.settings.panelWidthPct || 42, ph: j.settings.panelHeightPct || 52, pww: j.settings.panelWidePct || 66 })
               var next = j.settings.liveView === 'standalone'
               if (next !== S.liveView) { S.liveView = next; applyLiveView() }
             }
@@ -881,7 +919,7 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'bl-settings' },
         h('p', { style: { fontSize: 12.5, lineHeight: 1.8, margin: '2px 0 10px' } },
           '让 agent 驱动真实浏览器（本机 Chrome/Edge），你在观察窗里实时可见、可直接接管。',
-          '共 17 个 browser_* 工具：open/navigate/snapshot/click/move/type/upload/press/scroll/wait/eval/text/screenshot/tabs/history/downloads/close。',
+          '共 21 个 browser_* 工具：open/ext_setup/navigate/snapshot/click/move/type/press/scroll/upload/wait/eval/text/read/scrape/search/screenshot/tabs/history/downloads/close。',
           '登录态保存在 ' + '$DSH_HOME/dsh-browser-live/chrome-profile。'),
         h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 14 } },
           h('span', { className: 'bl-dot' + (state && state.alive ? ' on' : ''), style: { width: 9, height: 9 } }),
@@ -892,6 +930,24 @@ window.__ModuleLoader__.load({
           h('button', { className: 'bl-btn' + (lv !== 'standalone' ? ' bl-on' : ''), onClick: function () { put({ liveView: 'panel' }, '已切回 DSH 内嵌面板') }, title: '在 DSH 右下角浮动面板里看' }, '内嵌面板'),
           h('button', { className: 'bl-btn' + (lv === 'standalone' ? ' bl-on' : ''), onClick: function () { put({ liveView: 'standalone' }, '已切换：独立网页（/bl/view）') }, title: '弹出独立网页，可拖到副屏、F11 全屏' }, '独立网页'),
           h('span', { style: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' } }, '独立网页 = 新标签页里的全屏观察窗；面板标题栏的 ⧉ 也能随时弹出')),
+        // 面板几何：百分比（v0.12.0）。原来写死 px，宽屏上面板不再跟着变大；现在这三项都是"视口百分比"，
+        // 改完立刻生效（applyPanelGeometry 直接改 CSS 变量，不用重启、也不用等下次拉帧）。
+        h('div', { style: box },
+          h('span', { style: lab }, '面板宽度 %'),
+          h('input', { style: { ...inp, flex: '0 1 90px', minWidth: 70 }, type: 'number', min: 15, max: 95, value: geom.pw, onChange: function (e) { setGeom({ ...geom, pw: e.target.value }) } }),
+          h('span', { style: lab }, '面板高度 %'),
+          h('input', { style: { ...inp, flex: '0 1 90px', minWidth: 70 }, type: 'number', min: 15, max: 95, value: geom.ph, onChange: function (e) { setGeom({ ...geom, ph: e.target.value }) } }),
+          h('span', { style: lab }, '宽屏宽 %'),
+          h('input', { style: { ...inp, flex: '0 1 90px', minWidth: 70 }, type: 'number', min: 15, max: 98, value: geom.pww, onChange: function (e) { setGeom({ ...geom, pww: e.target.value }) } }),
+          h('button', {
+            className: 'bl-btn', onClick: function () {
+              var patch = { panelWidthPct: Number(geom.pw) || 42, panelHeightPct: Number(geom.ph) || 52, panelWidePct: Number(geom.pww) || 66 }
+              applyPanelGeometry(patch)                 // 先本地生效，别等往返
+              put(patch, '面板尺寸已保存（百分比，即时生效）')
+            },
+          }, '保存')),
+        h('div', { style: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary)', margin: '-4px 0 8px' } },
+          '面板宽/高都是视口百分比 ⇒ 换窗口大小、换显示器都自动等比（窄窗口由可读下限与视口边界兜底）。'),
         h('div', { style: box },
           h('span', { style: lab }, '代理服务器'),
           h('input', { style: inp, placeholder: '如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080；留空=跟随系统', value: proxy, onChange: function (e) { setProxy(e.target.value) } }),

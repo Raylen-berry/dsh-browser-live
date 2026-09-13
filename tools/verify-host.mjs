@@ -205,6 +205,43 @@ ok(tools.has('browser_ext_setup'), 'browser_ext_setup 已注册（一键备好�
 const extBad = JSON.parse(String(await tools.get('browser_ext_setup').execute({ kind: 'firefox' })))
 ok(extBad && extBad.ok === false && /edge/.test(extBad.error || ''), 'browser_ext_setup 拒绝非法 kind 且不产生副作用', JSON.stringify(extBad))
 ok(routes.has('/bl/bridge'), '/bl/bridge 路由已注册')
+
+// ---------------------------------------------------------------- 尺度是"百分比"而不是写死的像素（v0.12.0）
+{
+  const st = (await callRoute('/bl/settings.json')).json || {}   // GET 直接返回 settings 本体
+  ok(st.panelWidthPct === 42 && st.panelHeightPct === 52 && st.panelWidePct === 66,
+    '面板几何以百分比出现在设置里（默认 42/52/66）', JSON.stringify({ w: st.panelWidthPct, h: st.panelHeightPct, wide: st.panelWidePct }))
+  const p1 = (await callRoute('/bl/settings.json', { method: 'PUT', body: { panelWidthPct: 55, panelHeightPct: 70, panelWidePct: 80 } })).json?.settings || {}
+  ok(p1.panelWidthPct === 55 && p1.panelHeightPct === 70 && p1.panelWidePct === 80, 'PUT 能改面板百分比', JSON.stringify(p1))
+  const p2 = (await callRoute('/bl/settings.json', { method: 'PUT', body: { panelWidthPct: 999, panelHeightPct: 1, panelWidePct: 200 } })).json?.settings || {}
+  ok(p2.panelWidthPct === 95 && p2.panelHeightPct === 15 && p2.panelWidePct === 98, '离谱的百分比被钳到 15~95/98', JSON.stringify(p2))
+  await callRoute('/bl/settings.json', { method: 'PUT', body: { panelWidthPct: 42, panelHeightPct: 52, panelWidePct: 66 } })
+
+  // 窗口尺寸也接受百分比（按屏幕工作区换算）；量不到屏幕就放弃，不许瞎猜
+  ok(mod.resolveWindowSize('80%,85%', { w: 2560, h: 1440 }) === '2048,1224', '窗口尺寸 "80%,85%" 按屏幕换算成像素', mod.resolveWindowSize('80%,85%', { w: 2560, h: 1440 }))
+  ok(mod.resolveWindowSize('80%', { w: 1000, h: 800 }) === '800,640', '只写一个百分比时宽高同比例', mod.resolveWindowSize('80%', { w: 1000, h: 800 }))
+  ok(mod.resolveWindowSize('1440,900', { w: 2560, h: 1440 }) === '1440,900', '像素形式原样返回（向后兼容）')
+  ok(mod.resolveWindowSize('80%,85%', null) === '', '量不到屏幕时返回空 ⇒ 保持启动尺寸，不猜')
+  ok(mod.resolveWindowSize('5%', { w: 1000, h: 1000 }) === '100,100', '过小的百分比被钳到下限 10%', mod.resolveWindowSize('5%', { w: 1000, h: 1000 }))
+  const w1 = (await callRoute('/bl/settings.json', { method: 'PUT', body: { windowSize: '80%,85%' } })).json?.settings || {}
+  ok(w1.windowSize === '80%,85%', 'windowSize 允许百分比形态', String(w1.windowSize))
+  const w2 = (await callRoute('/bl/settings.json', { method: 'PUT', body: { windowSize: '八百块' } })).json?.settings || {}
+  ok(w2.windowSize === '80%,85%', '非法 windowSize 被忽略（保持上一次合法值）', String(w2.windowSize))
+  await callRoute('/bl/settings.json', { method: 'PUT', body: { windowSize: '1440,900' } })
+
+  // 防回归：面板几何必须走视口百分比，不能再退回写死的像素上限
+  const root = path.join(import.meta.dirname, '..')
+  const client = readFileSync(path.join(root, 'client.js'), 'utf8')
+  ok(/\.bl-panel\{[^}]*width:calc\(var\(--bl-pw/.test(client), '面板宽度用 --bl-pw 百分比变量')
+  ok(/\.bl-panel\{[^}]*max-height:calc\(var\(--bl-ph/.test(client), '面板高度用 --bl-ph 百分比变量（不再被截图宽高比牵着走）')
+  ok(!/clamp\(300px,42vw,560px\)/.test(client), '旧的"42vw 但上限 560px"写法已移除（那就是"固定尺寸"的来源）')
+  ok(/\.bl-stage\{[^}]*flex:1 1 auto[^}]*min-height:0/.test(client), '舞台吃满剩余高度（flex + min-height:0）')
+  ok(/\.bl-stage img\{[^}]*max-width:100%[^}]*max-height:100%/.test(client), '图片按比例装进舞台（contain，不裁不变形）')
+  // 独立页 /bl/view 本来就是这样写的，面板现在与它一致
+  const viewOk = /#stage\{[^}]*flex:1[^}]*min-height:0/.test(readFileSync(path.join(root, 'index.js'), 'utf8'))
+  ok(viewOk, '独立页 /bl/view 仍是同一套百分比写法（两处一致）')
+}
+
 ok(!existsSync(path.join(home, 'dsh-browser-live', 'bridge.json')), 'userBridge=false 时不起桥（不写 bridge.json）')
 const st0 = (await callRoute('/bl/state')).json
 ok(st0.backend === 'plugin' && (HAS_CHROMIUM || st0.alive === false),

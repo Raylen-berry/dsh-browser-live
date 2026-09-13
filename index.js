@@ -129,7 +129,9 @@ export function compatFlagsFor(exe) {
 }
 export { COMPAT_FLAGS }
 
-const DEFAULT_SETTINGS = Object.freeze({
+// 导出给 tools/settings.mjs 用：让"设置导出/导入"和插件本身**共享同一份默认值**，
+// 不再靠"改那边时这里跟着改"的注释约束（那种约定迟早漂移）。
+export const DEFAULT_SETTINGS = Object.freeze({
   fps: 2,            // 观察窗帧率（0.5~10）
   quality: 60,       // SSE JPEG 质量（20~90）
   headless: false,   // true 时 Chrome 无头（观察窗看的是虚拟页面）
@@ -138,6 +140,15 @@ const DEFAULT_SETTINGS = Object.freeze({
   extraArgs: '',     // 追加到 Chrome 命令行的空格分隔参数
   proxy: '',         // Chrome --proxy-server，例 http://127.0.0.1:7890 / socks5://127.0.0.1:1080；空=跟随系统
   liveView: 'panel', // panel=DSH 内嵌观察窗；standalone=独立网页 /bl/view（可丢到副屏/全屏）
+  // 观察窗面板的几何 —— **全部是视口百分比**（v0.12.0）：
+  // 面板宽/高/宽屏宽都是"屏幕的百分之多少"，于是换窗口大小、换显示器都自动等比，
+  // 不会出现"宽屏上面板还是那么点大"。CSS 里只留两个兜底：极窄窗口的可读下限与不越出视口。
+  panelWidthPct: 42,
+  panelHeightPct: 52,
+  panelWidePct: 66,
+  // 搜索的时间参数也做成可配（原来写死 30s/20s）：慢网络、被拦频繁、或想更激进换引擎时都要调它
+  searchCooldownMs: 30000,  // 某个引擎被判"被拦/改版"后冷却多久再试（5s~10min）
+  searchBudgetMs: 20000,    // 一次 browser_search 的总预算，含导航与重试（5s~2min）
   // true（默认）= 用 VBS 启动器把 Chrome 拉起成**独立进程**：脱离 DSH 的父进程/作业对象，
   // 于是它拥有真实可见的窗口句柄。false = 老行为 `spawn(...,{detached:false})`，
   // 在部分 Windows 环境（DSH Desktop 自身带作业对象时）拉起的 Chrome 会**没有窗口句柄**，
@@ -166,17 +177,36 @@ function loadSettings() {
     settings = sanitizeSettings(raw)
   } catch { /* 首用默认 */ }
 }
-function sanitizeSettings(raw) {
-  const s = { ...DEFAULT_SETTINGS }
+/**
+ * 设置清洗：从 `base` 出发，逐字段校验/钳位。
+ *
+ * `base` 是**默认值**还是**当前值**决定了"非法输入"的下场，这一点曾经是个真 bug：
+ * 原来固定从 DEFAULT_SETTINGS 出发，于是 PUT 一个非法值时该字段被**静默重置成默认**
+ * （比如 PUT {windowSize:'八百块'} 会把用户之前设好的 80% 冲掉），而 PUT 只改一个字段
+ * 时也会波及其它字段。现在从磁盘加载用默认值当底，PUT 用**当前设置**当底 ⇒ 非法值只是被忽略。
+ */
+function sanitizeSettings(raw, base = DEFAULT_SETTINGS) {
+  const s = { ...base }
   if (raw && typeof raw === 'object') {
     if (Number.isFinite(raw.fps)) s.fps = clamp(raw.fps, 0.5, 10)
     if (Number.isFinite(raw.quality)) s.quality = clamp(raw.quality, 20, 90)
     if (typeof raw.headless === 'boolean') s.headless = raw.headless
-    if (typeof raw.windowSize === 'string' && /^\d{3,4},\d{3,4}$/.test(raw.windowSize.trim())) s.windowSize = raw.windowSize.trim()
+    if (typeof raw.windowSize === 'string') {
+      const v = raw.windowSize.trim()
+      // 像素（1440,900）或**百分比**（80%,85% / 80%）都接受：百分比按屏幕工作区换算（v0.12.0）。
+      // 百分比的意义：换显示器/换机器不用改设置 —— "屏幕的 80%" 在任何屏幕上都是合理的窗口。
+      if (/^\d{3,4},\d{3,4}$/.test(v) || /^\d{1,3}%(\s*,\s*\d{1,3}%)?$/.test(v)) s.windowSize = v
+    }
     if (typeof raw.chromePath === 'string' && raw.chromePath.length < 512) s.chromePath = raw.chromePath
     if (typeof raw.extraArgs === 'string' && raw.extraArgs.length < 2000) s.extraArgs = raw.extraArgs
     if (typeof raw.proxy === 'string' && raw.proxy.length < 512) s.proxy = raw.proxy.trim()
     if (raw.liveView === 'standalone' || raw.liveView === 'panel') s.liveView = raw.liveView
+    // 面板几何：百分比（15%~95%/98%），挡住明显不合理的值
+    if (Number.isFinite(raw.panelWidthPct)) s.panelWidthPct = clamp(raw.panelWidthPct, 15, 95)
+    if (Number.isFinite(raw.panelHeightPct)) s.panelHeightPct = clamp(raw.panelHeightPct, 15, 95)
+    if (Number.isFinite(raw.panelWidePct)) s.panelWidePct = clamp(raw.panelWidePct, 15, 98)
+    if (Number.isFinite(raw.searchCooldownMs)) s.searchCooldownMs = clamp(raw.searchCooldownMs, 5000, 600000)
+    if (Number.isFinite(raw.searchBudgetMs)) s.searchBudgetMs = clamp(raw.searchBudgetMs, 5000, 120000)
     if (typeof raw.launchDetached === 'boolean') s.launchDetached = raw.launchDetached
     if (typeof raw.humanize === 'boolean') s.humanize = raw.humanize
     if (Number.isFinite(raw.humanSpeed)) s.humanSpeed = clamp(raw.humanSpeed, 0.3, 4)
@@ -826,8 +856,10 @@ export async function reportWindowState(port) {
       const b = bounds?.bounds || {}
       const visible = b.windowState !== 'minimized'
       // 顺手保证"可见且够大"：windowState 只认 normal/maximized，尺寸给到设置里的 windowSize
+      // （百分比形态这里不适用 —— 屏幕尺寸此时还不知道，交给启动后的 applyPercentWindowSize 处理）
       try {
-        const [w, h] = String(settings.windowSize || '1440,900').split(',').map((n) => Number(n) || 0)
+        const sizePx = /%/.test(String(settings.windowSize || '')) ? '1440,900' : String(settings.windowSize || '1440,900')
+        const [w, h] = sizePx.split(',').map((n) => Number(n) || 0)
         if (w > 400 && h > 300) await send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal', width: w, height: h } })
       } catch { /* 老版本 Chrome 不支持就跳过 */ }
       ws.close()
@@ -836,6 +868,40 @@ export async function reportWindowState(port) {
         + (visible ? '，屏幕上看不到就是被别的窗口盖住了' : '')
     } finally { try { ws.close() } catch { /* ignore */ } }
   } catch (e) { return '⚠ 启动后自查窗口失败：' + String(e?.message || e) }
+}
+
+/** 把 "宽%,高%" 形式的窗口尺寸解析成像素；给的是像素形式就原样返回。 */
+export function resolveWindowSize(winSize, avail) {
+  const s = String(winSize || '').trim()
+  const m = s.match(/^(\d{1,3})%(?:\s*,\s*(\d{1,3})%)?$/)
+  if (!m) return s
+  const wPct = clamp(Number(m[1]), 10, 100)
+  const hPct = clamp(Number(m[2] || m[1]), 10, 100)
+  if (!avail || !avail.w || !avail.h) return ''            // 量不到屏幕就放弃（保持启动时的尺寸）
+  return Math.round(avail.w * wPct / 100) + ',' + Math.round(avail.h * hPct / 100)
+}
+
+/**
+ * windowSize 写成百分比时，把窗口真正调到对应像素（v0.12.0）。
+ * 只对"插件自带实例"做：接管你日常浏览器时**不动你的窗口**（那是你的东西，不是 agent 的舞台）。
+ */
+async function applyPercentWindowSize() {
+  const s = browser.session
+  if (!s || !aliveOf(s) || isUserKind(s.kind) || settings.headless) return
+  if (!/%/.test(String(settings.windowSize || ''))) return
+  const tab = await selectedTab(s).catch(() => null)
+  if (!tab) return
+  const avail = await evaluate(tab, '({w:screen.availWidth,h:screen.availHeight})').catch(() => null)
+  const px = resolveWindowSize(settings.windowSize, avail)
+  if (!px) return
+  const [w, h] = px.split(',').map(Number)
+  try {
+    const { windowId } = await browser.cdp.send('Browser.getWindowForTarget', { targetId: tab.targetId })
+    await browser.cdp.send('Browser.setWindowBounds', { windowId, bounds: { width: w, height: h, windowState: 'normal' } })
+    noteAction(`🪟 窗口尺寸按百分比设置为 ${w}×${h}（屏幕 ${avail.w}×${avail.h} · 设置 ${settings.windowSize}）`)
+  } catch (e) {
+    noteAction(`窗口尺寸按百分比调整失败（${String((e && e.message) || e).slice(0, 80)}）；仍用启动时的尺寸`)
+  }
 }
 
 async function launch() {
@@ -906,7 +972,8 @@ async function launch() {
         `--user-data-dir=${profile}`,
         '--no-first-run', '--no-default-browser-check',
         '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows',
-        `--window-size=${settings.windowSize}`,
+        // --window-size 只认像素：百分比形态先给个合理初值，启动后由 applyPercentWindowSize 按屏幕换算
+        `--window-size=${/%/.test(String(settings.windowSize || '')) ? '1440,900' : settings.windowSize}`,
         // 代理：独立实例也走你指定的出口（http://host:port / socks5://host:port）；留空=跟随系统
         ...(settings.proxy ? [`--proxy-server=${settings.proxy}`] : []),
         ...parseExtraArgs(settings.extraArgs),
@@ -951,6 +1018,10 @@ async function launch() {
         if (extra.length) noteAction(`🩹 ${label} 需要兼容参数才能启动：${extra.join(' ')}（通常是安全软件拦了 GPU 进程沙箱）。已记住，下次直接用`)
         // 让窗口可见性变成"可观测事实"，而不是靠用户反馈
         reportWindowState(port).then((msg) => noteAction('🪟 ' + msg)).catch(() => {})
+        // 窗口尺寸写成百分比时（"80%,85%"）：先量屏幕工作区，再把窗口改成对应像素。
+        // 为什么要分两步：Chrome 的 --window-size 只认像素，百分比只能自己算；
+        // 而"屏幕多大"这件事在页面里最可靠（screen.availWidth/availHeight），所以先起来再调。
+        applyPercentWindowSize().catch(() => { })
         return
       }
       try { if (browser.proc) browser.proc.kill() } catch { /* 已经退了 */ }
@@ -1535,7 +1606,7 @@ export function normalizeSearchEngine(raw, fallbackLabel = '') {
   }
 }
 
-const SEARCH_COOLDOWN_MS = 30000            // 被拦/改版的引擎冷 30s 再试（照 backend-registry 的冷却思路）
+// 冷却时长与总预算都走设置（settings.searchCooldownMs / searchBudgetMs），不再写死在代码里
 const SEARCH_COOLDOWN = new Map()
 
 /**
@@ -1556,7 +1627,7 @@ export function searchFailHint(tried) {
     return '一条候选条目都没命中（hits=0）但页面有内容：这是**条目选择器（item）**不匹配/引擎改版。'
       + '改该引擎的 item（engineSpec 或 settings.search.engines 里改，不用动插件代码）。'
   }
-  if (reasons.has('blocked')) return '被反爬拦了：换别的引擎，或过一会儿再试（已自动冷却 30s）。'
+  if (reasons.has('blocked')) return '被反爬拦了：换别的引擎，或过一会儿再试（该引擎已按 settings.searchCooldownMs 冷却，默认 30s）。'
   if (reasons.has('not-loaded')) return '页面一直没加载出来：检查网络/代理，或改用已打开的标签页（newTab:false）再试。'
   return '看 tried 里每个引擎的 reason 与 hits：blocked=被拦、not-loaded=没加载完、layout-changed=条目选择器不匹配、filtered-out=条目命中但字段选择器不匹配。'
 }
@@ -2097,7 +2168,7 @@ function buildTools(t) {
         return { ok: false, error: 'engineSpec 不合法：' + inline.error, example: { url: 'https://example.com/search?q=%s', item: 'li.result', link: 'h3 a', title: 'h3', text: 'p' } }
       }
       const chain = inline
-        ? ['（自带）' + inline.label]
+        ? [inline.label]                       // 自带引擎：用它的显示名当链路标签（别再套一层前缀）
         : (args.engine && args.engine !== 'auto' ? [String(args.engine)] : searchOrder(all))
       const unknown = inline ? [] : chain.filter((k) => !all[k])
       if (unknown.length) {
@@ -2111,7 +2182,7 @@ function buildTools(t) {
         }
       }
 
-      const deadline = Date.now() + 20000        // 总预算：浏览器已花掉导航时间，别像 HTTP 版那样给 30s
+      const deadline = Date.now() + settings.searchBudgetMs   // 总预算（可配）：浏览器已花掉导航时间，别像 HTTP 版那样给太短
       const tried = []
       let challenge = null
       const tabBefore = browser.selected
@@ -2183,10 +2254,10 @@ function buildTools(t) {
             sample: raw?.sample ? String(raw.sample).slice(0, 200) : '',
           })
           if (reason === 'blocked') {
-            SEARCH_COOLDOWN.set(name, Date.now() + SEARCH_COOLDOWN_MS)
+            SEARCH_COOLDOWN.set(name, Date.now() + settings.searchCooldownMs)
             try { const ch = await callOnPage(tab, CHALLENGE_FN); if (ch && ch.challenge) challenge = ch.challenge } catch (e) { }
           }
-          if (reason === 'layout-changed') SEARCH_COOLDOWN.set(name, Date.now() + SEARCH_COOLDOWN_MS)
+          if (reason === 'layout-changed') SEARCH_COOLDOWN.set(name, Date.now() + settings.searchCooldownMs)
           break
         }
       }
@@ -2567,6 +2638,21 @@ async function registerSkillPack(ctx, disposers = []) {
 // ------------------------------------------------------------- apply (wiring)
 
 export async function apply(ctx, config) {
+  // 防"同一个进程里留下两份实例"（v0.12.0）：
+  // 2026-09-14 留痕链实测断在第 16 行，追下去就是这件事 —— 插件被重新 apply 时旧实例的
+  // 工具/AUDIT 仍在写（boot 记录一条条加，但旧那条线还活着），于是两条线各自记链尾。
+  // 留痕那边已经把 prev 改成"以文件为准"，这里再补一道：apply 之前先把上一个实例收掉。
+  // 只收**注册项与定时器**，不动浏览器进程/登录态（那些是用户的，重载插件不该顺手关掉浏览器）。
+  try {
+    const prevDispose = globalThis.__dshBrowserLiveDispose
+    if (typeof prevDispose === 'function') {
+      globalThis.__dshBrowserLiveDispose = null
+      await prevDispose()
+      console.log('[dsh-browser-live] 检测到上一次 apply 的实例，已先收回（避免重复注册工具/路由/留痕写入者）')
+    }
+  } catch (e) {
+    console.warn('[dsh-browser-live] 收回上一个实例时出错（继续 apply）：' + String((e && e.message) || e))
+  }
   loadSettings()
   browser.WS = await loadWs()
   if (!browser.WS) console.warn('[dsh-browser-live] 未解析到 ws 包，回退 Node 内置 WebSocket（对新版 Chrome 可能不稳）')
@@ -2827,7 +2913,7 @@ export async function apply(ctx, config) {
         if (req.method === 'PUT' || req.method === 'POST') {
           try {
             const before = `${settings.backendMode}|${settings.userDefault}`
-            settings = sanitizeSettings({ ...settings, ...(await readBody(req)) })
+            settings = sanitizeSettings({ ...settings, ...(await readBody(req)) }, settings)
             saveSettings()
             await syncBridge()   // userBridge 开关即时生效，不用重启 DSH
             // backendMode / userDefault 当场生效，别等下一次工具调用（切不了就只是这步失败，配置照样存）
@@ -2936,6 +3022,16 @@ export async function apply(ctx, config) {
   }
 
   await syncBridge()
+
+  // 把"怎么收掉本次注册"登记到 globalThis：下一次 apply 会先调它（见 apply 开头）。
+  // 只回收注册项与定时器；浏览器进程、登录态、桥的扩展安装都不动。
+  globalThis.__dshBrowserLiveDispose = async () => {
+    for (const off of offs.splice(0)) { try { await off() } catch { /* 单项失败不影响其余 */ } }
+    // 帧循环是模块级定时器（不是 ctx 注册项），也得停 —— 否则重载后会留着一条推帧的线
+    try { if (frameTimer) { clearInterval(frameTimer); frameTimer = null } } catch { /* ignore */ }
+    // 看帧的 SSE 连接：不断开的话旧实例会继续往旧响应里写
+    try { for (const res of viewers) { try { res.end() } catch { /* ignore */ } } viewers.clear() } catch { /* ignore */ }
+  }
 
   console.log('[dsh-browser-live] host up (v' + version + ') · ' + builtTools.length + ' 个 browser_* 工具已注册（' + auditedTools + ' 个带留痕） · 数据目录 ' + BASE_DIR())
   // 本次会话的开头记一条：这样"某天他到底开过几次、每次干了什么"能按 boot 分段读。

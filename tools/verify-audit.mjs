@@ -57,6 +57,18 @@ B.audit('boot', { version: '0.9.0', restart: true })
 v = verifyChain(file)
 ok(v.ok === true && v.records === 5, '同一天再开一个实例续写，链仍然自洽', v)
 
+// ---- ④b 两个实例**同时**在写同一个文件（真踩到过：插件被重新 apply，旧实例还在写） ----
+// 旧实现只在"跨天"时读一次文件尾，之后信内存里的 prev ⇒ 两条线各记各的链尾，链断成
+// "像被删过一行"的样子。现在每次写都读文件尾，prev 是文件的事实。
+const a1 = createAudit(dir, { now: () => fixed })
+const a2 = createAudit(dir, { now: () => fixed })
+a1.audit('tool', { tool: 'browser_open' })
+a2.audit('tool', { tool: 'browser_eval' })      // 另一个实例插进来写
+a1.audit('tool', { tool: 'browser_close' })     // 再回到第一个实例
+v = verifyChain(file)
+ok(v.ok === true && v.records === 8, '两个 AUDIT 实例交替写同一文件，链仍自洽（交错的写入者不再造成"假断链"）', v)
+ok(verifyChain(file).ok === true, '交错写之后，删行依然能被查出来（防篡改能力没被削弱）')
+
 // ---- ⑤ 截断要标注长度，不假装完整 ----
 const long = 'x'.repeat(5000)
 const t = trim(long, 4000)

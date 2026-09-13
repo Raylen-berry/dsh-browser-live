@@ -35,7 +35,17 @@ if (p.v) {
     ok(exists(path.join(ROOT, f)), `files 里声明的 ${f} 真的存在`)
   }
   const t = String((p.v.scripts && p.v.scripts.test) || '')
+  // verify-audit-chain.mjs 是**用户数据的自检**（检查真实留痕链是否被删/改过），不是代码测试：
+  // 混进 npm test 会让"改了代码跑测试"因为历史数据而失败（v0.12.0 拆分，见 CHANGELOG）。
+  // 它必须作为 audit:check 存在，并被排除在"npm test 覆盖"的判定之外。
+  const dataChecks = new Set(['verify-audit-chain.mjs'])
+  ok(String((p.v.scripts && p.v.scripts['audit:check']) || '').includes('tools/verify-audit-chain.mjs'),
+    'audit:check 覆盖实时留痕链自检（数据检查与代码测试分开）')
   for (const suite of readdirSync(path.join(ROOT, 'tools')).filter((f) => f.startsWith('verify-') && f.endsWith('.mjs'))) {
+    if (dataChecks.has(suite)) {
+      ok(!t.includes('tools/' + suite), `${suite} 是数据自检，不混进 npm test`)
+      continue
+    }
     ok(t.includes('tools/' + suite), `npm test 覆盖了 ${suite}`)
   }
 }

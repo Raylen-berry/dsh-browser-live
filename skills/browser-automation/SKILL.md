@@ -110,7 +110,7 @@ browser_snapshot                     # 再观察：确认动作真的生效了
 | `browser_type` 回读 `empty:true` | 输入被页面回滚了：改用 `browser_press` 逐键输入，或先点击该字段获得焦点再输入 |
 | 回读 `matches:false` | 页面做了格式化/截断（如自动加区号）：接受页面上的值，不要反复重填 |
 | 页面结构一直变（骨架屏/无限滚动） | 先 `browser_wait {selectorPresent}` 等到稳定容器，再 snapshot |
-| 搜索引擎被拦（`tried[].reason=blocked`） | 换一个 engine，或等 30 秒冷却后重试；**不要**因为"预设里没有我要的那个"就放弃，`engineSpec` 可以自带任何搜索页 |
+| 搜索引擎被拦（`tried[].reason=blocked`） | 换一个 engine，或等冷却（默认 30s，可配 `settings.searchCooldownMs`）后重试；**不要**因为"预设里没有我要的那个"就放弃，`engineSpec` 可以自带任何搜索页 |
 | `tried[].reason=layout-changed` / `filtered-out` | 选择器问题，不是"网站挂了"：前者改 `item`，后者改 `link/title/text`（`engineSpec` 或 settings 里改，见 §7） |
 | 依旧无解 | 把"我试了什么 + 页面现在什么样（snapshot 片段/截图路径）"交回用户，别自己绕 |
 
@@ -153,7 +153,7 @@ browser_search {query: "关键词", engineSpec: {             # 自带引擎：�
 - `tried[]` 里每一态的处置**不同**，别一律当成"引擎改版"：
   | reason | 含义 | 怎么办 |
   |---|---|---|
-  | `blocked` | 被反爬拦了 | 换引擎，或等冷却（30s）后再试 |
+  | `blocked` | 被反爬拦了 | 换引擎，或等冷却（默认 30s，可配）后再试 |
   | `not-loaded` | 页面还没加载完 | 工具已自动重试一次；还不行就查网络/代理 |
   | `layout-changed` | **item 选择器**一个都没命中 | 改 `item`（engineSpec 或 settings 里改） |
   | `filtered-out` | **命中了条目但字段全没通过**（看 `hits`） | 改 `link`/`title`/`text`，别怀疑整页结构 |
