@@ -89,8 +89,9 @@ node tools/settings.mjs import D:\bl-settings.json --yes   # 新机器（覆盖�
 
 ```powershell
 node tools/verify-audit.mjs         # 期望 PASS 15 项
-node tools/verify-host.mjs          # 期望 58 passed（3 项 fail 是套件无真 Chrome 的既有失败）
+node tools/verify-host.mjs          # 期望 73 passed / 0 failed（v0.10.0 起按"有/无真 Chromium"分两支断言）
 node tools/verify-audit-chain.mjs   # 期望 0 = 链完整（还没留痕时会跳过并返回 0）
+npm test                            # 全套；其中 verify-page-fns / verify-web-tools 会真起一个无头浏览器
 ```
 
 ## 工具一览（agent 侧）
@@ -133,13 +134,32 @@ v0.10.0 从 7 个同类 MIT 插件里蒸馏出三个工具，**没有新增任�
 |---|---|---|
 | `browser_read` | 读一篇文章/一个页面 | 四级正文降级（多 `article` ≥200 字 → `role=main` → `main` → 最大文本块）、噪音剥离、Markdown 输出、**段落感知截断**、meta/og/JSON-LD 元信息、链接清单、标题大纲 |
 | `browser_scrape` | 把列表/表格/搜索结果抓成行数据 | `item` + `fields`（`"h3 a@href"` 取链接并绝对化、`@html`、`@text`），命中不到时自适应重试 |
-| `browser_search` | 在浏览器里真搜 | Bing/百度/DDG HTML → 结构化条目；跳转链解包、URL 归一化去重、**三态空结果判定**、引擎冷却 |
+| `browser_search` | 在浏览器里真搜（**引擎无关**） | 打开"搜索 URL 模板" → 用 `{item,link,title,text}` 抽取 → 跳转链处理 → **四态空结果分诊** → 冷却换下一个 |
+
+**搜索引擎是"机制 + 数据"，不是一份菜单（v0.11.0）**：可迁移的技术是上面那套流程本身，与具体
+是哪个引擎无关。所以：
+
+- **预设**只有三个（`bing` / `baidu` / `ddg`），它们只是"开箱即用的默认值"，**不是**"可用清单"；
+- **要接任何别的引擎**（Google、Sogou、公司内网站内搜索、某个文档站的搜索框）不用改代码、不用配置、
+  不用重启 —— 调用时自带即可：
+
+```js
+browser_search({ query: '关键词', engineSpec: {
+  url: 'https://某个站点/search?q=%s',   // %s 或 {q} = 搜索词（缺占位符会明确报错并给示例）
+  item: 'li.result', link: 'h3 a', title: 'h3', text: 'p.summary', label: '显示名',
+}})
+```
+
+- **想长期复用**就写进 `$DSH_HOME/dsh-browser-live/settings.json`：
+  `"search": { "engines": { "我的站内搜索": { "url": "…%s", "item": "…", "link": "…", "title": "…", "text": "…" } }, "order": ["我的站内搜索"] }`
+  —— 设置按调用读盘，改完下次调用即生效；`order` 就是 `engine:"auto"` 时的尝试顺序。
+- 引擎名写错时，报错会**告诉你怎么自带**（而不是甩给你三个名字）。
 
 **为什么"在浏览器里搜"而不是发 HTTP 请求**：用的是你自己浏览器已授权的身份，比服务端抓取更少遇到
-反爬；且被拦时能**区分**三种情况并分别处置 —— `blocked`（换引擎 + 冷却 30s）、
-`not-loaded`（等 1.5s 重试一次）、`layout-changed`（引擎改版，选择器要更新，别硬试）。
-刻意不用 Google（同意页/验证码在真浏览器里一样中招）、不用 Bing RSS（浏览器里打开会变成 XML 视图）、
-不用公共 SearXNG 的 `format=json`（多数实例已关闭）。
+反爬。空结果会**按病因分诊**（四态，处置完全不同）：`blocked`（被反爬拦了 → 换引擎 + 冷却 30s）、
+`not-loaded`（页面没加载完 → 等一下重试）、`layout-changed`（**item 选择器**没命中 → 改 item）、
+`filtered-out`（**命中了条目但字段全没通过** → 改 link/title/text）。最后一态是实测逼出来的：
+百度那次 `hits=8` 却没有结果，原来被笼统报成"引擎改版"，把人引到错误的排查方向。
 
 **为什么不做成"自带行动循环的 agent"**：循环是 DSH agent 自己的事。这里只把"看得懂"和"抓得到"补上，
 再用一份**调用方案**告诉 agent 怎么组合。所以：
@@ -373,6 +393,17 @@ host(index.js) ──WS──> 扩展（extension/, MV3，Chrome 和 Edge 各装
 
 ## 版本与变更记录
 
+- **v0.11.0**：**把搜索从"菜单"改回"机制"，并把"写镜像"这一类 bug 修到根上** ——
+  ①`browser_search` 不再定死引擎：`SEARCH_ENGINES` 降级为**预设**，新增 `engineSpec`（调用时自带
+  `{url:'…%s', item, link, title, text}`，任何搜索页/站内搜索都能接，**免改代码、免配置、免重启**，
+  有端到端测试）与 `settings.search={engines,order}` 长期配置；报错也改成教你怎么自带引擎。
+  ②`viewOf()` 是单向拷贝，导致所有 `browser.xxx = v` 都是写空气 —— 全库排查出的受害面包括
+  `browser_tabs{action:'select'}` 与观察窗点标签页（**报 ok 但页面没换**）、拟人鼠标"笔尖"与视口尺寸
+  每次调用被重置；现在这些字段是**写透访问器**，该类错误语法上不可能再犯。
+  ③空结果分诊补上第四态 `filtered-out`（命中 item 但字段选择器不匹配），并修掉"页面偏短就先判
+  没加载完"的优先级 bug（命中了条目本身就证明加载完了）；这同时**更正**了 v0.10.1 里一句我写了却
+  没实现的声明。
+  ④`browser_read` 不再被徽章淹没：图片 URL >120 字符只留 alt 并记账（`imagesOmitted`）。
 - **v0.10.1**：**把 v0.10.0 拉到真网站上跑，两个修复** ——
   ①「**新开标签页后当前页还在旧页**」这个既有 bug（`browser_open {newTab}`／`browser_tabs new` 都中招；
   `browser_search` 因此在旧页上抽取并误报"页面还没加载完"）：`Target.createTarget` 异步生效 +

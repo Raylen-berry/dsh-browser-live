@@ -28,7 +28,7 @@ description: 用真实浏览器完成网页任务时的调用方案（读正文�
 |---|---|---|
 | 读一篇文章 / 一个页面的正文 | `browser_read` | 自动找正文、给 Markdown、段落感知截断，长文用 offset 续读 |
 | 把列表/表格/搜索结果抓成行数据 | `browser_scrape` | `item` + `fields`（`"a@href"` 取链接并绝对化），不用写 JS |
-| 在浏览器里搜索 | `browser_search` | 真搜（Bing/百度/DDG），结果读成结构化条目；被拦会自动换引擎 |
+| 在浏览器里搜索 | `browser_search` | 引擎无关：打开搜索 URL 模板 → 按四个选择器抽取 → 跳转链处理 / 空结果按病因分诊；不在预设里的引擎用 `engineSpec` 自带 |
 | 看页面上有什么可点/可填 | `browser_snapshot` | 拿 ref、role、状态标记（disabled/outside/covered-by）、ctx |
 | 点击 / 输入 | `browser_click` / `browser_type` | 用 ref；工具自带可操作性检查与输入回读 |
 | 等异步结果出现 | `browser_wait` | `textContains` / `selectorPresent` / `urlMatches` |
@@ -110,7 +110,8 @@ browser_snapshot                     # 再观察：确认动作真的生效了
 | `browser_type` 回读 `empty:true` | 输入被页面回滚了：改用 `browser_press` 逐键输入，或先点击该字段获得焦点再输入 |
 | 回读 `matches:false` | 页面做了格式化/截断（如自动加区号）：接受页面上的值，不要反复重填 |
 | 页面结构一直变（骨架屏/无限滚动） | 先 `browser_wait {selectorPresent}` 等到稳定容器，再 snapshot |
-| 搜索引擎被拦 | 换 engine（`browser_search {engine:"baidu"}`），或等 30 秒冷却后重试 |
+| 搜索引擎被拦（`tried[].reason=blocked`） | 换一个 engine，或等 30 秒冷却后重试；**不要**因为"预设里没有我要的那个"就放弃，`engineSpec` 可以自带任何搜索页 |
+| `tried[].reason=layout-changed` / `filtered-out` | 选择器问题，不是"网站挂了"：前者改 `item`，后者改 `link/title/text`（`engineSpec` 或 settings 里改，见 §7） |
 | 依旧无解 | 把"我试了什么 + 页面现在什么样（snapshot 片段/截图路径）"交回用户，别自己绕 |
 
 ---
@@ -132,15 +133,30 @@ browser_snapshot                     # 再观察：确认动作真的生效了
 ## 7. 搜索：`browser_search` 的正确用法
 
 ```
-browser_search {query: "关键词", engine: "bing", limit: 10}
-→ {ok, engine, results:[{rank,title,url,snippet}], tabIndex, previousTabIndex, tried}
+browser_search {query: "关键词", limit: 10}                # 默认：按配置顺序试已知引擎
+browser_search {query: "关键词", engine: "<某个预设名>"}     # 点名某个预设
+browser_search {query: "关键词", engineSpec: {             # 自带引擎：任何搜索页/站内搜索
+  url: "https://某站点/search?q=%s",                       #   %s 或 {q} = 搜索词（必需）
+  item: "li.result", link: "h3 a", title: "h3", text: "p.summary", label: "显示名",
+}}
+→ {ok, engine, engineLabel, results:[{rank,title,url,snippet}], tabIndex, previousTabIndex, tried}
 ```
 
+**这是"机制"不是"菜单"**：能搜的关键在于"搜索 URL 模板 + 四个选择器"，与哪个引擎无关。
+所以**不要**因为某个站点/引擎不在预设里就放弃 —— 直接传 `engineSpec` 接上去（免改代码免重启）；
+要长期用就写进 `settings.json` 的 `search.engines`。预设名可以在报错返回里的 `availableEngines` 看到。
+
 - 默认**新开标签页**搜，不动你正在看的页面；`tabIndex` 告诉你结果页在哪，
-  `previousTabIndex` 是原来那页——读完结果用 `browser_tabs {action:"select", index:<previousTabIndex>}` 回去。
-- 想深看某条结果：先切到结果页所在标签，再 `browser_navigate {url: <结果 url>}` + `browser_read`。
-- `tried` 里 `blocked` = 被反爬拦（已自动冷却该引擎、并尝试下一个）；`layout-changed` = 引擎改版
-  （选择器要更新，别硬试）；`not-loaded` = 页面还没加载完（工具已自动重试过一次）。
+  `previousTabIndex` 是原来那页 —— 读完结果用 `browser_tabs {action:"select", index:<previousTabIndex>}` 回去。
+- 想深看某条结果：`browser_tabs {action:"select"}` 切到结果页，再 `browser_navigate {url:<结果 url>}` + `browser_read`。
+  （`viaEngineRedirect:true` 的条目 url 是引擎跳转链，看不出来真实域名 —— 直接 navigate 过去，再看 `location.href`。）
+- `tried[]` 里每一态的处置**不同**，别一律当成"引擎改版"：
+  | reason | 含义 | 怎么办 |
+  |---|---|---|
+  | `blocked` | 被反爬拦了 | 换引擎，或等冷却（30s）后再试 |
+  | `not-loaded` | 页面还没加载完 | 工具已自动重试一次；还不行就查网络/代理 |
+  | `layout-changed` | **item 选择器**一个都没命中 | 改 `item`（engineSpec 或 settings 里改） |
+  | `filtered-out` | **命中了条目但字段全没通过**（看 `hits`） | 改 `link`/`title`/`text`，别怀疑整页结构 |
 - 全链失败且带 `challenge` → 走 §8。
 
 ---
@@ -221,7 +237,7 @@ browser_read {}                    # truncated 就按 next 续读
 
 **B. 搜索 → 深读一条结果**
 ```
-browser_search {query:"某个技术问题", engine:"bing"}
+browser_search {query:"某个技术问题"}           # 不在预设里的站点就加 engineSpec
 browser_navigate {url: <results[0].url>}      # 在结果页那个标签里
 browser_read {selector:"article"}              # 只取正文，省 token
 browser_tabs {action:"select", index:<previousTabIndex>}   # 回原页（可选）

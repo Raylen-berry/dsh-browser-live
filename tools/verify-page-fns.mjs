@@ -257,6 +257,25 @@ inner fence
   ok(Array.isArray(r.headings) && r.headings.some((h) => h.level === 2 && h.text === '小节标题'), '标题大纲被读出')
   ok(r.textLength > 3000, 'textLength 反映全文长度（不是窗口长度）', r.textLength)
 
+  // 图片：超长 URL（徽章/统计图）只留 alt，短 URL 照旧保留 —— 实测 GitHub README 的徽章行
+  // 是 `[![alt](camo.githubusercontent.com/<64位hex>/<编码后原图>)](链接)`，几百字符纯噪音。
+  const imgFile = w('images.html', `<!doctype html><html><body><article><h1>图片处理</h1>
+<p><img src="https://camo.githubusercontent.com/${'a'.repeat(64)}/${'b'.repeat(120)}" alt="徽章甲"></p>
+<p><a href="https://example.com/x"><img src="https://camo.githubusercontent.com/${'c'.repeat(64)}/${'d'.repeat(120)}" alt="徽章乙"></a></p>
+<p><img src="https://example.com/pic/photo.jpg" alt="正常配图"></p>
+<p><img src="/no-alt.gif"></p>
+<p>${'正文填充。'.repeat(40)}</p></article></body></html>`)
+  const imf = await openFixture(imgFile)
+  const im = await imf.inject(FNS.READ_FN, [{ limit: 3000, links: true }])
+  ok(im.text.includes('![徽章甲]'), '超长 URL 的图片只留 alt（不再铺 URL）', JSON.stringify(im.text.slice(0, 200)))
+  ok(!im.text.includes('camo.githubusercontent.com'), '长图片 URL 不出现在正文里')
+  // 徽章外面套着链接时：图片 URL 去掉，但**链接保留**（`[![alt]](href)` 很短，且链接本身有信息量）
+  ok(im.text.includes('[![徽章乙]](https://example.com/x)'), '外链里的徽章：去图片 URL、留链接', JSON.stringify(im.text.slice(0, 260)))
+  ok(im.text.includes('![正常配图](https://example.com/pic/photo.jpg)'), '短 URL 的图片照旧保留完整 Markdown')
+  ok(im.imagesOmitted && im.imagesOmitted.longUrl === 2 && im.imagesOmitted.noAlt === 1, '省略的图片被记账（2 长 URL / 1 无 alt）', JSON.stringify(im.imagesOmitted))
+  ok(/imagesNote|图片处理/.test(JSON.stringify(im)), '结果里说明图片是怎么处理的', JSON.stringify(im.imagesNote))
+  imf.close()
+
   // 纯文本模式
   const t = await f.inject(FNS.READ_FN, [{ format: 'text', limit: 500, links: false }])
   ok(!/^#\s/m.test(t.text) && !t.text.includes(']('), 'format=text 时不产出 Markdown 语法', t.text.slice(0, 120))
@@ -342,7 +361,7 @@ console.log('\n[3] SEARCH_FN —— SERP 抽取与归一')
   <div class="c-container"><a href="https://www.baidu.com/more/">百度更多（引擎内链，应被过滤）</a></div>
 </div></body></html>`)
   const bdx = await openFixture(baiduFile)
-  const bspec = { ...mod.SEARCH_ENGINES.baidu.spec, limit: 10 }
+  const bspec = { ...mod.SEARCH_PRESETS.baidu.spec, limit: 10 }
   const braw = await bdx.inject(FNS.SEARCH_FN, [bspec])
   ok(braw.count === 3, '百度：3 条真结果（"更多"内链被过滤）', JSON.stringify(braw.items && braw.items.map((x) => x.url && x.url.slice(0, 40))))
   ok(braw.emptyReason === '', '百度：不算空结果（曾误报 layout-changed）', braw.emptyReason)
@@ -365,6 +384,35 @@ console.log('\n[3] SEARCH_FN —— SERP 抽取与归一')
   ok(merged[0].rank === 1 && merged[1].rank === 2, 'rank 重新编号')
   const capped = mod.mergeSearchResults(Array.from({ length: 20 }, (_, i) => ({ url: 'https://e.test/' + i, title: 't' + i, snippet: 's' })), 5)
   ok(capped.length === 5, 'limit 封顶生效')
+
+  // 四态判定：hits=0 与 hits>0 必须分开报 —— 前者是**条目选择器（item）**不对，
+  // 后者是**字段选择器（link/title/text）**不对。原来两者都报 layout-changed，
+  // 实测百度那次（hits=8、out=0）就被误诊成"引擎改版"，方向错一半。
+  const filtFile = w('filtered.html', `<!doctype html><html><head><meta charset="utf-8"><title>字段不匹配</title></head><body>
+<div id="wrap">
+  <div class="hit"><span>条目一但没有链接</span></div>
+  <div class="hit"><span>条目二也没有链接</span></div>
+</div>
+<p>${'页面有正文内容，所以不能被判成"还没加载完"。'.repeat(20)}</p></body></html>`)
+  const ff = await openFixture(filtFile)
+  const fo = await ff.inject(FNS.SEARCH_FN, [{ item: '.hit', link: 'a', title: 'h2', text: '.none', limit: 5 }])
+  ok(fo.hits === 2 && fo.count === 0, '命中了 2 个条目但一条都没通过校验', JSON.stringify({ hits: fo.hits, count: fo.count }))
+  ok(fo.emptyReason === 'filtered-out', '这种中间态报 filtered-out（不是 layout-changed）', fo.emptyReason)
+  const lm = await ff.inject(FNS.SEARCH_FN, [{ item: '.nope', link: 'a', title: 'h2', text: 'p', limit: 5 }])
+  ok(lm.hits === 0 && lm.emptyReason === 'layout-changed', '真的一个条目都没命中才报 layout-changed', JSON.stringify({ hits: lm.hits, reason: lm.emptyReason }))
+  ff.close()
+  // 极短页面（正文 <300 字，thin=true）但命中了条目：**不许**报 not-loaded ——
+  // 命中条目本身就证明页面已经加载，问题只可能在字段选择器上。
+  // （这条是实测抓到的优先级 bug：原来 thin 先判，于是"命中 2 条但字段不匹配"被说成"页面还没加载完"。）
+  const shortFile = w('short-filtered.html', `<!doctype html><html><head><meta charset="utf-8"><title>极简站内搜索</title></head><body><div class="hit"><span>短页条目</span></div></body></html>`)
+  const sf = await openFixture(shortFile)
+  const so = await sf.inject(FNS.SEARCH_FN, [{ item: '.hit', link: 'a', title: 'h2', text: 'p', limit: 5 }])
+  ok(so.hits === 1 && so.emptyReason === 'filtered-out', '极短页面命中条目 ⇒ 仍报 filtered-out（不许说"没加载完"）', JSON.stringify({ hits: so.hits, reason: so.emptyReason }))
+  sf.close()
+  // host 侧按 hits 给出不同的修法建议（别一律说"引擎改版了"）
+  ok(/字段选择器/.test(mod.searchFailHint([{ engine: 'x', reason: 'filtered-out', hits: 8 }])), 'filtered-out 的建议指向字段选择器')
+  ok(/条目选择器（item）/.test(mod.searchFailHint([{ engine: 'x', reason: 'layout-changed', hits: 0 }])), 'layout-changed 的建议指向 item')
+  ok(/换别的引擎/.test(mod.searchFailHint([{ engine: 'x', reason: 'blocked' }])), 'blocked 的建议指向换引擎')
 
   // 三层空结果判定：先"页面有内容但选择器没命中"（改版），再"反爬拦截"，最后"页面还没加载"
   const af = await openFixture(articleFile)

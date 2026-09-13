@@ -176,9 +176,24 @@ ok(has(openNew, '"ok":true'), 'browser_open {newTab:true} 成功', openNew.slice
 const afterNew = await call('browser_eval', { expression: 'location.href' })
 ok(afterNew.includes('page.html'), 'browser_open {newTab:true} 之后当前页也是新开的那个', String(afterNew).slice(-60))
 
+// browser_tabs {action:'select'} 是同一个 bug 类的另一个受害点：它原来只写 browser.selected
+// （会话字段的镜像），于是报 ok:true 而页面根本没换 —— 连工具自己输出的"用 select 切回原页"都是坏的。
+const listNow = JSON.parse(await call('browser_tabs', { action: 'list' }))
+const otherIdx = listNow.tabs.findIndex((t) => (t.url || '').includes('other.html'))
+const curIdx = listNow.tabs.findIndex((t) => t.selected)
+ok(otherIdx >= 0 && curIdx >= 0 && otherIdx !== curIdx, '存在可切换的另一个标签页', JSON.stringify(listNow.tabs.map((t) => [t.i, t.selected, (t.url || '').slice(-22)])))
+const selRes = await call('browser_tabs', { action: 'select', index: otherIdx })
+ok(has(selRes, '"ok":true'), '切标签页返回成功', selRes.slice(0, 120))
+const afterSel = await call('browser_eval', { expression: 'location.href' })
+ok(String(afterSel).includes('other.html'), '切换后当前页**真的变成**那一页（不是"报成功但没换"）', String(afterSel).slice(-60))
+const backIdx = listNow.tabs.findIndex((t) => (t.url || '').includes('other.html') === false && (t.url || '').includes('page.html'))
+await call('browser_tabs', { action: 'select', index: backIdx >= 0 ? backIdx : curIdx })
+const afterBack = await call('browser_eval', { expression: 'location.href' })
+ok(String(afterBack).includes('page.html'), '再切回来同样生效（双向都对）', String(afterBack).slice(-60))
+
 console.log(`\n[8] browser_search 的参数校验（不联网）`)
 const badEngine = await call('browser_search', { query: 'x', engine: 'google-but-not-a-real-key' })
-ok(has(badEngine, '"ok":false', '未知引擎'), '未知引擎名被拒并列出可用引擎', badEngine.slice(0, 240))
+ok(has(badEngine, '"ok":false', '引擎名不认识'), '未知引擎名被拒', badEngine.slice(0, 240))
 let queryErr = null
 try { await call('browser_search', {}) } catch (e) { queryErr = e }
 ok(queryErr && /query/.test(String(queryErr.message)), '缺 query 被 schema 拦下', String(queryErr && queryErr.message))
@@ -194,7 +209,32 @@ if (process.env.BL_TEST_SEARCH === '1') {
   console.log('\n[8] browser_search 真联网：跳过（置 BL_TEST_SEARCH=1 可跑；选择器腐烂靠它尽早发现）')
 }
 
-console.log('\n[9] 收尾')
+console.log(`\n[9] 自带引擎（engineSpec）：机制与引擎无关，任何搜索页都能接`)
+// 用一个**形状与 bing/百度都不同**的本地页面当"搜索页"：证明抽取机制不绑死任何引擎的 DOM，
+// 也不需要改代码、不需要写 settings、不需要重启。
+writeFileSync(rel('my-serp.html'), `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>自家站内搜索</title></head><body>
+<h1>站内搜索</h1>
+<article class="hit"><a class="t" href="https://example.com/doc/1">文档一：安装</a><p class="s">第一份文档的摘要。</p></article>
+<article class="hit"><a class="t" href="https://example.com/doc/2">文档二：插件</a><p class="s">第二份文档的摘要。</p></article>
+<p>${'这是搜索页的填充文本，保证不是空白页。'.repeat(12)}</p>
+</body></html>`)
+const customRes = JSON.parse(await call('browser_search', {
+  query: '插件',
+  newTab: false,
+  engineSpec: { url: fileUrl('my-serp.html') + '?q=%s', item: 'article.hit', link: 'a.t', title: 'a.t', text: 'p.s', label: '自家站内搜索' },
+}))
+ok(customRes.ok === true && customRes.count === 2, '自带引擎跑通（零配置，未改代码未重启）', JSON.stringify(customRes).slice(0, 300))
+ok(customRes.engineLabel === '自家站内搜索', 'engineLabel 用 engineSpec.label', String(customRes.engineLabel))
+ok(customRes.results[0].url === 'https://example.com/doc/1' && customRes.results[0].snippet === '第一份文档的摘要。', '字段映射按 engineSpec 生效（title/link/text）', JSON.stringify(customRes.results[0]))
+const badSpec = JSON.parse(await call('browser_search', { query: 'x', engineSpec: { url: 'https://e.test/search', item: 'li' } }))
+ok(badSpec.ok === false && /占位符/.test(badSpec.error), 'engineSpec 缺 %s 占位符时明确报错并给示例', JSON.stringify(badSpec).slice(0, 260))
+const badSpec2 = JSON.parse(await call('browser_search', { query: 'x', engineSpec: { url: 'https://e.test/s?q=%s' } }))
+ok(badSpec2.ok === false && /item/.test(badSpec2.error), 'engineSpec 缺 item 时明确报错', JSON.stringify(badSpec2).slice(0, 200))
+const unknownEngine = JSON.parse(await call('browser_search', { query: 'x', engine: 'nonexistent' }))
+ok(unknownEngine.ok === false && /engineSpec/.test(unknownEngine.error) && Array.isArray(unknownEngine.availableEngines),
+  '"引擎名不认识"时告诉你怎么自带引擎（而不是只给一份菜单）', JSON.stringify(unknownEngine).slice(0, 300))
+
+console.log('\n[10] 收尾')
 const closed = await call('browser_close', {})
 ok(has(closed, '"ok":true'), 'browser_close 正常收尾（不留浏览器进程）', closed.slice(0, 160))
 

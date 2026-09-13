@@ -34,6 +34,12 @@ export function readPageInPage(args) {
   var ZERO_WIDTH_RE = /[\u200b\u200c\u200d\ufeff]/g
   var MD_TABLE_MAX_ROWS = 25
   var MD_MAX_DEPTH = 60
+  // 图片 URL 超过这个长度就不再铺进正文（改只留 alt）：实测 GitHub README 的徽章行是
+  // `[![alt](camo.githubusercontent.com/<64位hex>/<编码后的原图>)](链接)`，一整行几百字符、
+  // 对"读内容"毫无价值却会把正文淹掉。要图片地址请用 browser_eval / browser_scrape。
+  var MD_IMG_URL_MAX = 120
+  // 被省略的图片统计（跟着结果一起交回，别静默丢东西）
+  var imgStat = { longUrl: 0, noAlt: 0 }
 
   // ---- 基础工具 ----
   function txt(el) { return (el && (el.innerText || el.textContent) || '') }
@@ -104,7 +110,11 @@ export function readPageInPage(args) {
       var src = node.currentSrc || node.getAttribute('src') || node.getAttribute('data-src') || ''
       if (!src) return ''
       try { src = new URL(src, location.href).href } catch (e) { }
-      return alt ? '![' + escInline(alt) + '](' + mdUrl(src) + ')' : ''
+      // 无 alt 的图片对"读内容"没有信息量（原来直接返回空串，这里记一笔账）
+      if (!alt) { imgStat.noAlt++; return '' }
+      // 超长 URL 多半是徽章/统计图：只留 alt。留着 URL 的收益远小于它淹没正文的代价。
+      if (src.length > MD_IMG_URL_MAX) { imgStat.longUrl++; return '![' + escInline(alt) + ']' }
+      return '![' + escInline(alt) + '](' + mdUrl(src) + ')'
     }
     if (tag === 'A') {
       var inner = childInline(node, depth + 1)
@@ -438,6 +448,14 @@ export function readPageInPage(args) {
     }
     if (args.links !== false) res.links = links(roots[0] || document.body, Math.max(1, Math.min(Number(args.linkLimit) || 30, 100)))
     if (args.headings) res.headings = headings(roots[0] || document.body)
+    // 图片只留 alt 时记账：别让人以为"页面没有图"，也别让人找不到图片地址（用 browser_eval/scrape 取）
+    if (imgStat.longUrl || imgStat.noAlt) {
+      var bits = []
+      if (imgStat.longUrl) bits.push(imgStat.longUrl + ' 张 URL 过长（只留了 alt）')
+      if (imgStat.noAlt) bits.push(imgStat.noAlt + ' 张没有 alt')
+      res.imagesOmitted = imgStat
+      res.imagesNote = '图片处理：' + bits.join('、') + '。要图片地址请用 browser_eval / browser_scrape。'
+    }
     return res
   } catch (e) {
     return { ok: false, error: 'readPage 失败: ' + String((e && e.message) || e) }
@@ -513,8 +531,9 @@ export const SCRAPE_FN = scrapePageInPage.toString()
 // 三件事必须做对，否则会得到"看起来成功但全是垃圾"的结果：
 //   1. 跳转链解包 —— DDG/Bing 的结果 href 常是 /l/?uddg=<编码后的真 URL> 或 ?url=，
 //      不解包就等于把搜索跳转页当成结果 URL 交回去。
-//   2. "被拦"判定 —— 命中 0 条时要能区分「被反爬拦了」「页面还没加载完」「引擎改版了」，
-//      这三种的处置完全不同（换引擎 / 等一下重试 / 改选择器），不能一律报"没结果"。
+//   2. "被拦"判定 —— 命中 0 条时要能区分四种病因：{被反爬拦了 / 页面还没加载完 / 条目选择器不匹配 /
+//      条目命中了但字段全没通过}。四者的处置完全不同（换引擎 / 等一下重试 / 改 item / 改 link·title·text），
+//      一律报"没结果"或者一律报"引擎改版"都会把人带去错误的排查方向（百度那次就是被误诊成改版）。
 //   3. 相对/协议相对 URL 绝对化 + 只要 http(s)。
 // ---------------------------------------------------------------------------
 export function searchPageInPage(spec) {
@@ -582,13 +601,25 @@ export function searchPageInPage(spec) {
   var isEmpty = out.length === 0
   var blocked = isEmpty && blockedRe.test(head)
   var thin = bodyText.replace(/\s+/g, '').length < 300
+  // 四态空结果（host 靠这个决定"该改什么"，别让四种病因说成同一句话）：
+  //   blocked       被反爬拦了      → 换引擎 / 等冷却
+  //   not-loaded    页面还没加载    → 重试或检查网络
+  //   layout-changed 条目选择器没命中（hits=0，页面有内容）→ 改 item
+  //   filtered-out  **条目命中了但一条都没通过校验**（hits>0）→ 改 link/title/text，或链接被内链守卫挡了
+  // 第四种是实测逼出来的：百度那次就是 hits=8、out=0，原来被判成 layout-changed，
+  // 于是人被告知"引擎改版了，去改选择器"——方向错一半。
+  // 顺序要紧：**先看有没有命中条目**，再看页面是不是空的。
+  // 命中了条目就说明页面已经加载了（哪怕正文短，比如一个极简的站内搜索页），
+  // 这时"没加载完"的结论一定是错的 —— 问题只可能出在字段选择器上。
+  var emptyReason = ''
+  if (isEmpty) emptyReason = blocked ? 'blocked' : (nodes.length > 0 ? 'filtered-out' : (thin ? 'not-loaded' : 'layout-changed'))
   return {
-    ok: !isEmpty || !thin,
+    ok: out.length > 0,
     count: out.length,
+    hits: nodes.length,                       // 候选条目命中数：区分"选择器不对"和"字段不对"
     items: out,
     blocked: blocked,
-    // 三种空结果要能被 host 区分（见文件头注释）
-    emptyReason: isEmpty ? (blocked ? 'blocked' : (thin ? 'not-loaded' : 'layout-changed')) : '',
+    emptyReason: emptyReason,
     title: document.title || '',
     url: location.href,
     sample: isEmpty ? head.slice(0, 800) : '',
