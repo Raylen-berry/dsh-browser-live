@@ -33,6 +33,39 @@ dsh plugin --profile web add link:D:\DeepSeek\dsh-plugins\dsh-browser-live
 
 装完**重启一次 DSH Desktop**。设置 → 插件 里可开关；侧栏底部出现 🌐 观察窗按钮。
 
+## 发布前检查（CI 与本地同一条命令）
+
+push / PR 都会跑 `.github/workflows/ci.yml`，它只做一件事：`npm test`。本地跑的就是同一条命令，
+**不装任何依赖、不联网**：
+
+```bash
+npm test                       # = node tools/run-all.mjs
+node tools/run-all.mjs --list  # 只看清单：跑哪些、以及哪些被排除、为什么
+audit:check                    # 只校验留痕哈希链（= node tools/verify-audit-chain.mjs）
+```
+
+`tools/run-all.mjs` 把 8 项语法门禁（`node --check`）和每套测试都跑完再汇总（原来的 `npm test` 是 `&&` 串，
+第一套一失败后面的就不跑了），任一套非 0 退出 ⇒ `npm test` 退出码 1 ⇒ CI 变红。
+CI 用 Node 20/22/24 三档矩阵、windows-latest。
+
+本机实测（Node 24.9.0）参与门禁的六套：
+
+| 套件 | 本机结果 |
+| --- | --- |
+| `tools/verify-audit.mjs` | 17 项通过 |
+| `tools/verify-audit-chain.mjs` | 通过 |
+| `tools/verify-audit-redact.mjs` | 56 项通过 |
+| `tools/verify-extension-v2.mjs` | 160 项通过 |
+| `tools/verify-launcher.mjs` | 15 项通过 |
+| `tools/verify-manifest.mjs` | 30 项通过 |
+
+**未纳入 CI** 的套件（原因同时写在 `tools/run-all.mjs` 的 `EXCLUDED` 里）：
+`verify-bridge.mjs` / `verify-bridge-v2.mjs` / `verify-extension.mjs` / `verify-result-cap.mjs`
+（要 npm 的 `ws` 包 —— 本机是从 DSH 安装目录解析到的，CI 里没有）、
+`verify-host.mjs`（同上，且它断言 `browser_open{gui:true}` 成功，本机真有 Chromium 时会**拉起真浏览器**）、
+`verify-launch.mjs`（要 `ws`，且 `loadWs()` 取 `m.default` 而不是 ESM 命名导出 `WebSocket`，用标准 npm `ws` 时 4 项窗口自查必失败）、
+`verify-page-fns.mjs` / `verify-web-tools.mjs`（会拉无头 Chromium 做 CDP 实测，CI 里不许起真浏览器）。
+
 ## 换台机器：可迁移性与**必须手动的步骤**
 
 > 给后续在任何一台机器上接手的人或 agent —— **本插件有一部分能力拿不到就是拿不到，必须人手动做**，

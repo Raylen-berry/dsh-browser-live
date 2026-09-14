@@ -1,0 +1,36 @@
+name: CI
+
+# 发布前检查：push / PR 都跑同一套离线测试，任一环节非 0 退出即整体失败。
+#
+# 为什么是 windows-latest：本插件驱动 Windows 上的 Chrome/Edge，套件在 Windows 上实测通过
+#   （本机无 WSL 发行版，Linux/macOS 未实测 ⇒ 不放进 CI 冒红）。
+# 为什么是 20/22/24 矩阵：仓库没写 engines，按 20 = 最老仍常见的 LTS、22 = 当前 LTS、
+#   24 = DSH Desktop 实际内置的运行时（本机 DSH 自带的 node 就是 v24.9.0）；
+#   三档已用**独立下载的** node 在干净环境逐套实测通过。
+#
+# 全程不联网跑测试：不起真浏览器、不做真实下载、不调真实模型。
+# 已排除的套件与原因（详见 tools/run-all.mjs 的 EXCLUDED，`node tools/run-all.mjs --list` 可打印）：
+#   · verify-bridge / verify-bridge-v2 / verify-extension —— 要 npm 的 ws 包（本机从 DSH 安装目录解析到）
+#   · verify-host —— 同上，且断言 browser_open{gui:true} 成功，本机真有 Chromium 时会拉起**真浏览器**
+#   · verify-launch —— 要 ws；且 loadWs() 取 m.default 而不是 ESM 命名导出，标准 npm ws 下 4 项窗口自查必失败
+#   · verify-result-cap —— 要 ws（真链路那段读桥的 bridge.json，无 ws 时桥起不来）
+#   · verify-page-fns / verify-web-tools —— 会拉真 Chromium 做 CDP 实测，CI 里不许
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      # npm test = node tools/run-all.mjs：8 项语法门禁 + 6 套离线套件，每套都跑完再汇总，
+      # 任一套失败 ⇒ 退出码 1。测试不需要任何依赖，所以没有 npm install（离线可跑）。
+      - run: npm test
