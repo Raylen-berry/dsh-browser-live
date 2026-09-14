@@ -62,6 +62,8 @@ window.__ModuleLoader__.load({
       '.bl-dot.on{background:#3fb96f;box-shadow:0 0 6px rgba(63,185,111,.9)}',
       // 黄灯 = 浏览器还在跑，但画面已经断流（正在自动重连）。绿灯只代表"画面真的在更新"。
       '.bl-dot.warn{background:#e0a63c;box-shadow:0 0 6px rgba(224,166,60,.85)}',
+      // 灰实心 = 收起成一条时主动暂停了画面流（不是断流，也不是浏览器没跑）
+      '.bl-dot.paused{background:#8b93a0}',
       '.bl-status{flex:none;font-size:11px;color:#e0a63c;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:34%}',
       // 画面上盖一条"这不是实时画面"，避免把最后一帧当成现场
       '.bl-stale{position:absolute;left:50%;top:10px;transform:translateX(-50%);background:rgba(120,78,10,.86);color:#ffe9c2;border-radius:8px;padding:3px 10px;font-size:11px;line-height:16px;pointer-events:none;white-space:nowrap}',
@@ -391,28 +393,38 @@ window.__ModuleLoader__.load({
     }
 
     // ------------------------------------------------------------ 画面健康（v0.13.0）
-    // 两个**独立**的事实，别再混成一个绿点（用户 2026-09-14 反馈）：
+    // 三个**独立**的事实，别再混成一个绿点（用户 2026-09-14 反馈）：
     //   ① 浏览器运行中 —— 宿主 /bl/state 的 alive（轮询 2.5s）
     //   ② 画面在更新   —— SSE 最近一帧的到达时间（阈值按最慢档 1 FPS 留三次余量）
-    // 绿灯 = 两条都成立；黄灯 = 浏览器在跑但画面断了（正在自动重连），
-    // 此时画面上还会盖一条"画面已停 · 最后更新于 X 秒前"，免得把最后一帧当现场。
+    //   ③ 主动暂停     —— 收起成一条时**不拉画面流**（v0.14.0，省截图/传输/解码），不算断流
+    // 绿灯 = ①② 都成立；黄灯 = 浏览器在跑但画面断了（自动重连中），画面上还盖一条
+    // "画面已停 · 最后更新于 X 秒前"；灰实心灯 = ③ 收起暂停。
     var STALE_MS = 3500
     function hostAlive() { return !!(S.state && S.state.alive) }
-    /** 纯函数（测试缝 tools/verify-panel-health.mjs）：三个事实 ⇒ 该亮哪种灯。
-     *  hostAlive=浏览器在跑；hasStream=有 SSE 连接；lastFrameAt=最近一帧时刻（0=从没收到）。 */
+    /** 纯函数（测试缝 tools/verify-panel-health.mjs）：几个事实 ⇒ 该亮哪种灯。
+     *  hostAlive=浏览器在跑；hasStream=有 SSE 连接；lastFrameAt=最近一帧时刻（0=从没收到）；
+     *  paused=主动暂停（收起态）。 */
     function computeHealth(facts) {
       var f = facts || {}
       if (!f.hostAlive) return 'off'
+      if (f.paused) return 'paused'
       var last = Number(f.lastFrameAt) || 0
       if (!f.hasStream && last === 0) return 'alive'   // 老内核无 EventSource：只能说"在运行"
       if (last === 0) return 'stale'                   // 有连接但一帧都没来
       return (Number(f.now) - last) < STALE_MS ? 'live' : 'stale'
     }
     function healthState() {
-      return computeHealth({ hostAlive: hostAlive(), hasStream: !!S.es, lastFrameAt: S.lastFrameAt, now: Date.now() })
+      return computeHealth({
+        hostAlive: hostAlive(),
+        hasStream: !!S.es,
+        lastFrameAt: S.lastFrameAt,
+        now: Date.now(),
+        paused: S.open && S.min === true,
+      })
     }
-    /** 黄灯旁边写什么：从没收到过帧 vs 中途断了，是两件事。 */
+    /** 灯旁边写什么：从没收到过帧 / 中途断了 / 被收起暂停，是三件事。 */
     function healthText(state, lastFrameAt) {
+      if (state === 'paused') return '已暂停（收起中）'
       if (state !== 'stale') return ''
       return Number(lastFrameAt) > 0 ? '正在重连' : '还没收到画面'
     }
@@ -421,6 +433,7 @@ window.__ModuleLoader__.load({
       var st = healthState()
       els.dot.classList.toggle('on', st === 'live')
       els.dot.classList.toggle('warn', st === 'stale')
+      els.dot.classList.toggle('paused', st === 'paused')
       if (els.status) els.status.textContent = healthText(st, S.lastFrameAt)
       if (els.stale) {
         var showStale = st === 'stale' && S.lastFrameAt > 0
@@ -429,7 +442,16 @@ window.__ModuleLoader__.load({
           els.staleAge.textContent = String(Math.max(0, Math.round((Date.now() - S.lastFrameAt) / 1000)))
         }
       }
-      updateMinTitle()   // 收起成一条时也要能看出"画面停了"
+      updateMinTitle()   // 收起成一条时也要能看出"画面停了/被暂停"
+    }
+    /** 画面流该不该拉：只有"面板开着且没被收成一条"才拉。
+     *  收起时主动断流 —— 宿主那条 `/bl/stream` 是"无查看者零开销"，断开即真的省掉截图与传输；
+     *  状态仍靠 `/bl/state` 轮询维持（标题、灯、agent 动作条照常更新），展开立即恢复。 */
+    function applyStreamState() {
+      var want = S.open && !S.min
+      S.paused = !!(S.open && S.min)
+      if (want) { if (!S.es) openStream() } else closeStream()
+      renderHealth()
     }
     function startHealthTick() {
       if (S.health) return
@@ -519,6 +541,8 @@ window.__ModuleLoader__.load({
       if (els.min) els.min.classList.toggle('bl-mini', S.min)
       updateMinTitle()
       applyPanelPos()          // 尺寸变了，位置要钳回视口
+      // 收起 = 暂停画面流（省截图/传输/解码；宿主 /bl/stream 无查看者零开销），展开立即恢复
+      applyStreamState()
       if (save !== false) blSave(MIN_KEY, S.min ? '1' : '0')
     }
     function toggleMin() { setMin(!S.min) }
@@ -877,7 +901,7 @@ window.__ModuleLoader__.load({
       S.open = true
       els.panel.style.display = 'flex'
       applyPanelPos()
-      openStream()
+      applyStreamState()   // 展开态才拉画面流（收起态主动暂停）
       if (!S.poll) S.poll = setInterval(pollState, 2500)
       startHealthTick()   // 1s 心跳：喂"最后更新于 X 秒前"和绿灯/黄灯的翻转
       pollState()

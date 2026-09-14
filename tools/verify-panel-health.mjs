@@ -77,6 +77,15 @@ if (it) {
     computeHealth({ hostAlive: true, hasStream: false, lastFrameAt: now - 10000, now }) === 'stale')
   ok('缺参数不抛错（facts 为空 ⇒ off）', computeHealth() === 'off' && computeHealth({}) === 'off')
 
+  console.log('\n— 1b. 收起暂停（v0.14.0）：暂停不是断流 —')
+  ok('收起暂停 + 浏览器在跑 ⇒ paused（灰实心，不报黄灯）',
+    computeHealth({ hostAlive: true, hasStream: false, lastFrameAt: now - 60000, now, paused: true }) === 'paused')
+  ok('暂停优先于断流判定（哪怕刚断过一秒）',
+    computeHealth({ hostAlive: true, hasStream: true, lastFrameAt: now - 100, now, paused: true }) === 'paused')
+  ok('浏览器没跑时暂停也报 off（off 优先）',
+    computeHealth({ hostAlive: false, hasStream: false, lastFrameAt: 0, now, paused: true }) === 'off')
+  ok('暂停文案是「已暂停（收起中）」', healthText('paused', now) === '已暂停（收起中）')
+
   console.log('\n— 2. 黄灯旁边写什么：断流 vs 还没收到 —')
   ok('断流 ⇒ 「正在重连」', healthText('stale', now - 5000) === '正在重连')
   ok('从没收到过 ⇒ 「还没收到画面」', healthText('stale', 0) === '还没收到画面')
@@ -95,6 +104,14 @@ ok('面板里有状态文字位（顶部）', SRC.includes('id="bl-status"'))
 ok('画面上下有"画面已停 · 最后更新于 X 秒前"的角标', SRC.includes('id="bl-stale"') && SRC.includes('画面已停'))
 ok('CSS 里有黄灯样式 .bl-dot.warn', /\.bl-dot\.warn\{/.test(SRC))
 ok('收起成一条时也会标出画面已停', /画面已停'/.test(SRC) && /function updateMinTitle/.test(SRC))
+// v0.14.0：收起成一条 = 主动暂停画面流（省截图/传输/解码），展开立即恢复
+ok('有 applyStreamState 且判定条件是"面板开着且没收起"',
+  /function applyStreamState\(\)/.test(SRC) && /var want = S\.open && !S\.min/.test(SRC))
+ok('收起/展开都会过一遍它（setMin 里）', /applyStreamState\(\)/.test(SRC.slice(SRC.indexOf('function setMin'), SRC.indexOf('function toggleMin'))))
+ok('showPanel 不再无条件拉流（改成 applyStreamState）',
+  /applyStreamState\(\)   \/\/ 展开态才拉画面流/.test(SRC) && !/applyPanelPos\(\)\n      openStream\(\)/.test(SRC))
+ok('CSS 里有暂停灯样式 .bl-dot.paused', /\.bl-dot\.paused\{/.test(SRC))
+ok('healthState 把收起态传成 paused', /paused: S\.open && S\.min === true/.test(SRC))
 
 console.log('\n结果：' + pass + ' 通过 / ' + fail + ' 失败')
 process.exit(fail === 0 ? 0 : 1)
