@@ -62,8 +62,9 @@ triage / calling-convention skill) distilled from these — all MIT:
     observable goal per step, per-failure recovery table, executable
     anti-patterns) that skills/browser-automation/SKILL.md is modelled on.
 
-  liustack/modsearch  ·  DDWDUC/dsh-free-search  ·  anweat/dsh-web-search-pro
+  liustack/modsearch  ·  DDDMUC/dsh-free-search  ·  anweat/dsh-web-search-pro
   Copyright (c) 2026 their respective contributors  (MIT License)
+  https://github.com/liustack/modsearch · https://github.com/DDDMUC/dsh-free-search · https://github.com/anweat/dsh-web-search-pro
   → browser-usable search-engine URLs and selectors, the three-way empty-result
     triage (blocked / not-loaded / layout-changed), per-engine cooldown, and the
     deliberate rejections (no Google, no Bing RSS, no SearXNG json endpoint).

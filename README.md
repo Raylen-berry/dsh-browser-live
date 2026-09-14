@@ -738,7 +738,7 @@ host(index.js) ──WS──> 扩展（extension/, MV3，Chrome 和 Edge 各装
   人机验证特征集与判定顺序）、[Lum1104/dsh-browser](https://github.com/Lum1104/dsh-browser)
   （WeakMap 稳定编号 / 无障碍名字优先级 / 输入后回读 / 页面内容按不可信数据处理）、
   [Tencent/BrowserSkill](https://github.com/Tencent/BrowserSkill)（技能即调用方案的组织骨架）、
-  [modsearch](https://github.com/liustack/modsearch) · [dsh-free-search](https://github.com/DDWDUC/dsh-free-search) ·
+  [modsearch](https://github.com/liustack/modsearch) · [dsh-free-search](https://github.com/DDDMUC/dsh-free-search) ·
   [dsh-web-search-pro](https://github.com/anweat/dsh-web-search-pro)（引擎 URL 与选择器 / 空结果三态判定 / 冷却）。
 - 本仓库是**独立自研的重实现**：不含 ego-browser / ego-lite 的任何一行代码，不携带其运行时 vendored 源码。
   v0.10.0 起为诚实起见，`NOTICE` 里明确声明了两类"不是纯概念借鉴"的东西：**事实性数据**
