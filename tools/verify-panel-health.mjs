@@ -113,5 +113,16 @@ ok('showPanel 不再无条件拉流（改成 applyStreamState）',
 ok('CSS 里有暂停灯样式 .bl-dot.paused', /\.bl-dot\.paused\{/.test(SRC))
 ok('healthState 把收起态传成 paused', /paused: S\.open && S\.min === true/.test(SRC))
 
+// ── 独立页 /bl/view（v0.15.0）：同一套健康口径，写在 host 的 VIEW_PAGE 里 ──────────
+// 它原来和面板犯同一个错（收到过帧就一直绿），而且它的 2.5s 轮询还会按 /bl/state
+// 把绿点**重新点亮** —— 断流后看起来比面板更像"在实时播"。
+console.log('\n— 4. 独立页 /bl/view 同样按"画面在更新"点灯 —')
+const HOST_SRC = readFileSync(path.join(REPO, 'index.js'), 'utf8')
+ok('独立页记了 lastFrameAt 并在帧到达时刷新', /lastFrameAt=Date\.now\(\)/.test(HOST_SRC))
+ok('独立页有 render() 单点决定灯色（绿=新鲜 / 黄=断流）',
+  /function render\(\)\{var alive=/.test(HOST_SRC) && /dot\.classList\.toggle\("warn"/.test(HOST_SRC))
+ok('独立页轮询不再按"宿主说活着就点绿"', !/classList\.toggle\("on",!!st\.alive\)/.test(HOST_SRC))
+ok('独立页有画面已停角标与状态文字位', HOST_SRC.includes('id="stale"') && HOST_SRC.includes('id="stat"') && HOST_SRC.includes('画面已停'))
+
 console.log('\n结果：' + pass + ' 通过 / ' + fail + ' 失败')
 process.exit(fail === 0 ? 0 : 1)
