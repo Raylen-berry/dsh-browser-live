@@ -37,6 +37,12 @@
     "test": "node tools/run-all.mjs",
     "audit:check": "node tools/verify-audit-chain.mjs"
   },
+  "devDependencies": {
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

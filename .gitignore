@@ -1,0 +1,5 @@
+node_modules/
+*.log
+
+# 依赖锁：CI 用 npm ci 装测试依赖，package-lock.json **必须**提交（不要忽略它）
+# （原来本仓库没有 .gitignore，依赖目录会被 git status 当成待提交内容）

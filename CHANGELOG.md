@@ -1,5 +1,114 @@
 # 变更记录
 
+## 未发布 — CI 装测试依赖 + 恢复 6 套测试；修 `loadWs()` 的导出形状缺陷；verify-manifest 改口径
+
+### ① 产品缺陷：`loadWs()` 的导出形状只对了一半（"本机全绿、CI 全红"的根因）
+
+**核实**（先只读复现，再改）：`index.js` 的 `loadWs()` 返回 `m.default || m`，而调用处是
+`const { WebSocket } = await loadWs()`（约 `index.js:847`）。npm `ws` 的两种布局导出形状不同 ——
+实测（真实 `ws@8.21.3`）：
+
+| 入口 | 命名空间 | `m.default` | `m.default.WebSocket` | 解构 `{ WebSocket }` |
+| --- | --- | --- | --- | --- |
+| 裸包名 `import('ws')`（走 `exports` → `wrapper.mjs`） | 有具名 `WebSocket` | **类本身** | **undefined** | **undefined ⇒ 报"WebSocket 不可用"** |
+| 直接文件路径 `import('<…>/ws/index.js')`（DSH 安装目录那种布局） | 只有 `default` | `module.exports` | 有（`index.js` 尾部 `WebSocket.WebSocket = WebSocket` 自引用） | 恰好能用 |
+
+于是"干净机器 / CI 上 npm 装好 `ws` 之后，`reportWindowState()` 仍然报 WebSocket 不可用"。
+
+**改了两处**（最小改动，同一个缺陷的两半）：
+1. `loadWs()`：`const W = m?.WebSocket ?? m?.default?.WebSocket ?? m?.default`，
+   并写清两种布局的差异；`loadWsModule()` 用同一套取法（原来两个分支也是散的）。
+2. 调用处 `reportWindowState()`：`const WS = await loadWs()`（原来是解构 `{ WebSocket }`）。
+   不能只改 ① —— ① 之后 `loadWs()` 返回的是**构造器本身**，再去解构 `.WebSocket` 就两种布局都取不到。
+
+顺带：`loadWs()` 现在 `export` 出来，测试能直接调它。新增测试缝 `DSH_BROWSER_LIVE_WS`
+（带路径分隔符的当直接文件路径、否则当裸包名），让套件用临时夹具把两种布局各测一遍，
+不依赖本机装没装 `ws`。
+
+**数字**（`tools/verify-launch.mjs`，本机装了真 npm `ws`）：
+
+| | verify-launch |
+| --- | --- |
+| 改动前（原 `index.js`）+ 新断言 | **14 passed / 10 failed** |
+| 改动后 | **24 passed / 0 failed** |
+
+其中 4 项是窗口自查（`Browser.getWindowForTarget`/`getWindowBounds`/`setWindowBounds` 那几条），
+与任务描述里的"稳定 13 passed / 4 failed"是同一件事。
+
+**同类问题排查**（"靠 `dirname(execPath)` 猜路径"这一类，就是本地绿、CI 红的根因）——列表见下，结论都给了：
+
+| 位置 | 写法 | 结论 |
+| --- | --- | --- |
+| `index.js:337`（`loadWs`）、`index.js:355`（`loadWsModule`） | `path.join(path.dirname(process.execPath),'..','..','ws','index.js')` | **不修**。它只是候选表里的一项，是"DSH 安装目录那种布局"的真实兜底；候选表第一位是裸包名 `ws`，干净环境/CI 由 `npm ci` 解析到，不依赖它。 |
+| `index.js:230`（`loadDefineTool`） | 同款 `dirname(execPath)` 猜 `@deepseek-ai/dsh-tools` | **不修**。有 `defineToolLite` 兜底，且套件不依赖真包（本轮实测无 `@deepseek-ai/*` 也能全绿）。 |
+| `index.js:334/353/342/359` | `dshHome()` / `%APPDATA%` 下的 `profiles/node_modules/ws` | **不修**。同上，是兜底候选，不是唯一来源。 |
+| `tools/verify-manifest.mjs` | 无（读的是仓库文件） | 本轮的耦合断言问题，见 ②。 |
+| `tools/selfcheck`（**不在本仓库**） | 见 dsh-video-prompt 的 CHANGELOG | 那个仓库已改成"`DSH_APP_DIR` 指向仓库根"。 |
+
+> 这一类写法的共同风险是：**它们让"本机恰好能用"看起来像"代码是对的"**。
+> 本轮的处理原则是——候选表可以留兜底，但**主路径必须在干净环境可解析**，
+> 并且每个候选形状都要有断言钉住（`verify-launch` 的两种布局断言就是干这个的）。
+
+### ② `verify-manifest.mjs` 的耦合断言改成"等价且更强"的口径，并从 KNOWN_FAILING 挪回 SUITES
+
+**核实**：它原来读 `package.json` 的 `scripts.test` **字符串**，断言每个 `verify-*.mjs` 都逐个出现在
+那个长串里。`npm test` 现在只是 `node tools/run-all.mjs`，长串本身不存在了 ⇒ 14 项「npm test 覆盖了 X」失败
+（另 17 项通过，`✗ verify-manifest: 17 passed, 14 failed`）。
+
+**改法**（只允许同强度或更强，不许放宽）：改成检查 `tools/run-all.mjs` 的三个清单本身 ——
+① 每个套件文件都登记进 `SUITES`/`EXCLUDED`/`KNOWN_FAILING` 三选一（无遗漏，原意图）；
+② 三份清单两两不重叠、清单内部无重复（新增，旧口径查不出）；
+③ 登记的名字都对应 `tools/` 下真实存在的文件（无幽灵条目，新增）；
+④ 排除项必须写明原因（新增）；
+⑤ `verify-audit-chain.mjs` 仍由 `npm run audit:check` 覆盖。
+
+**数字**：`✗ 17 passed, 14 failed` → **`✓ 26 passed, 0 failed`**（从 `KNOWN_FAILING` 挪进 `SUITES`）。
+反向证据：从 `SUITES` 里删掉一套 ⇒ 报「verify-bridge-v2.mjs 未登记」（25 passed / 1 failed）；
+把同一套同时放进 `SUITES` 与 `EXCLUDED` ⇒ 报「SUITES ∩ EXCLUDED」（25 passed / 1 failed）。
+
+### ③ CI 装测试依赖（只装 devDependencies），恢复 6 套；测试执行期间仍不出网
+
+- `package.json`：`devDependencies: {"ws": "^8.18.0"}`，并加 `engines.node >= 22`（理由见下）。
+- 新增 `.npmrc`：`legacy-peer-deps=true`（peerDependencies 是宿主 DSH 运行时提供的，
+  npm 7+ 会自动去装 35 个 `@deepseek-ai/*`，测试一个都不需要）+ 显式钉 `registry.npmjs.org`
+  （本机 `~/.npmrc` 是 npmmirror 镜像，不钉的话 lockfile 里会写镜像 URL，换公网 runner 取不到包）。
+- 新增 `.gitignore`（本仓库此前**没有**，依赖目录会被 `git status` 当成待提交内容）+ 提交 `package-lock.json`。
+- `tools/run-all.mjs`：6 套从 `EXCLUDED` 挪进 `SUITES`；`KNOWN_FAILING` 清空。
+- `.github/workflows/ci.yml`：加 `npm ci --no-audit --no-fund` 与 `cache: npm`，
+  并在注释里写明**测试执行期间不出网**（允许出网的只有 `npm ci` 那一步）。
+
+**恢复的 6 套与干净环境实测**（`DSH_HOME`/`APPDATA`/`LOCALAPPDATA`/`USERPROFILE` 全指空目录）：
+
+| 套件 | 项数 |
+| --- | --- |
+| `tools/verify-bridge.mjs` | 23 |
+| `tools/verify-bridge-v2.mjs` | 74 |
+| `tools/verify-extension.mjs` | 77 |
+| `tools/verify-browsers.mjs` | 35 |
+| `tools/verify-result-cap.mjs` | 67 |
+| `tools/verify-launch.mjs` | 24 |
+
+**CI 矩阵从 20/22/24 改成 22/24**（这一条是实测纠正，不是省事）：
+
+Node 20 **没有全局 `WebSocket`**（实测 `node20 globalThis.WebSocket = undefined`，
+`node22/24 = function`），而扩展代码 `extension/background.js:397` 用的是裸 `new WebSocket(...)`，
+`index.js` 也有"没有 ws 包就退回 `globalThis.WebSocket`"这条兜底。于是
+`verify-extension` / `verify-browsers` / `verify-result-cap` 三套在 Node 20 上必红
+（干净环境实测：8/8 语法门禁过，套件 9/12，其中 `verify-result-cap` **49 passed / 18 failed**）。
+所以把真实下限写进 `engines.node >= 22`，矩阵写 22/24，并在 CI 注释、README 里写明原因 ——
+而不是把红的套件藏起来。
+
+**干净环境实测（独立下载的 node）**：Node 22 与 Node 24 均为
+**8/8 语法门禁 + 12/12 套件**，`npm test` 退出码 **0**。
+
+### ④ 仍未纳入 CI 的 3 套（原因）
+
+| 套件 | 原因 |
+| --- | --- |
+| `tools/verify-host.mjs` | 会**真的拉起浏览器**：`browser_open{gui:true}` 在有 Chromium 的机器上断言"启动成功"（真窗口 + 真 CDP），CI runner 自带 Edge |
+| `tools/verify-page-fns.mjs` | 会拉无头 Chromium（Edge/Chrome）做 CDP 实测 |
+| `tools/verify-web-tools.mjs` | 同上，会拉真 Chromium 做 CDP 实测 |
+
 ## 0.12.1 — 长结果被截坏：超限改成"序列化前裁剪"，声明上限与实测对齐（20k 正文 / 24k 整体）
 
 缺陷（另一轮只读审计的发现，已自行核实并复现）

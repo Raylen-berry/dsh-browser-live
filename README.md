@@ -35,36 +35,58 @@ dsh plugin --profile web add link:D:\DeepSeek\dsh-plugins\dsh-browser-live
 
 ## 发布前检查（CI 与本地同一条命令）
 
-push / PR 都会跑 `.github/workflows/ci.yml`，它只做一件事：`npm test`。本地跑的就是同一条命令，
-**不装任何依赖、不联网**：
+push / PR 都会跑 `.github/workflows/ci.yml`，它做两件事：`npm ci`（只装 devDependencies）→ `npm test`。
+本地跑的就是同一条命令：
 
 ```bash
+npm install                    # 只装 devDependencies（就一个 ws）；CI 用 npm ci
 npm test                       # = node tools/run-all.mjs
 node tools/run-all.mjs --list  # 只看清单：跑哪些、以及哪些被排除、为什么
-audit:check                    # 只校验留痕哈希链（= node tools/verify-audit-chain.mjs）
+npm run audit:check            # 只校验留痕哈希链（= node tools/verify-audit-chain.mjs）
 ```
+
+**出网边界**：只有 `npm ci` / `npm install` 那一步出网（按 `package-lock.json` 装 devDependencies）。
+`npm test` 本身**不出网** —— 不做真实下载、不调真实模型、不起真浏览器、不读本机 DSH 安装目录。
 
 `tools/run-all.mjs` 把 8 项语法门禁（`node --check`）和每套测试都跑完再汇总（原来的 `npm test` 是 `&&` 串，
 第一套一失败后面的就不跑了），任一套非 0 退出 ⇒ `npm test` 退出码 1 ⇒ CI 变红。
-CI 用 Node 20/22/24 三档矩阵、windows-latest。
+CI 用 Node **22 / 24** 两档矩阵、windows-latest。
 
-本机实测（Node 24.9.0）参与门禁的六套：
+> **为什么没有 Node 20**（本轮实测纠正）：扩展代码 `extension/background.js` 里的裸
+> `new WebSocket(...)`、以及"没有 ws 包就退回 `globalThis.WebSocket`"那条路，都依赖**全局 WebSocket**，
+> 而 Node 20 没有这个全局对象（实测 `node20 globalThis.WebSocket = undefined`，`node22/24 = function`）。
+> 于是 `verify-extension` / `verify-browsers` / `verify-result-cap` 三套在 Node 20 上必红
+> （干净环境实测：8/8 语法门禁过、套件 9/12，其中 `verify-result-cap` 49 passed / 18 failed）。
+> 所以矩阵写 22/24，并在 `package.json` 里声明 `engines.node >= 22` —— 把真实下限写进 manifest，而不是把红藏起来。
 
-| 套件 | 本机结果 |
-| --- | --- |
-| `tools/verify-audit.mjs` | 17 项通过 |
-| `tools/verify-audit-chain.mjs` | 通过 |
-| `tools/verify-audit-redact.mjs` | 56 项通过 |
-| `tools/verify-extension-v2.mjs` | 160 项通过 |
-| `tools/verify-launcher.mjs` | 15 项通过 |
-| `tools/verify-manifest.mjs` | 30 项通过 |
+干净环境实测（`DSH_HOME` / `APPDATA` / `LOCALAPPDATA` / `USERPROFILE` 全指空目录，独立下载的 node）：
+
+| 套件 | Node 22 | Node 24 |
+| --- | --- | --- |
+| `tools/verify-audit.mjs` | 通过 | 通过 |
+| `tools/verify-audit-chain.mjs` | 通过 | 通过 |
+| `tools/verify-audit-redact.mjs` | 56 项通过 | 56 项通过 |
+| `tools/verify-extension-v2.mjs` | 160 项通过 | 160 项通过 |
+| `tools/verify-launcher.mjs` | 15 项通过 | 15 项通过 |
+| `tools/verify-manifest.mjs` | 26 项通过 | 26 项通过 |
+| `tools/verify-bridge.mjs` | 23 项通过 | 23 项通过 |
+| `tools/verify-bridge-v2.mjs` | 74 项通过 | 74 项通过 |
+| `tools/verify-extension.mjs` | 77 项通过 | 77 项通过 |
+| `tools/verify-browsers.mjs` | 35 项通过 | 35 项通过 |
+| `tools/verify-result-cap.mjs` | 67 项通过 | 67 项通过 |
+| `tools/verify-launch.mjs` | 24 项通过 | 24 项通过 |
+
+合计 **8/8 语法门禁 + 12/12 套件**，两档均 `npm test` 退出码 0。
 
 **未纳入 CI** 的套件（原因同时写在 `tools/run-all.mjs` 的 `EXCLUDED` 里）：
-`verify-bridge.mjs` / `verify-bridge-v2.mjs` / `verify-extension.mjs` / `verify-result-cap.mjs`
-（要 npm 的 `ws` 包 —— 本机是从 DSH 安装目录解析到的，CI 里没有）、
-`verify-host.mjs`（同上，且它断言 `browser_open{gui:true}` 成功，本机真有 Chromium 时会**拉起真浏览器**）、
-`verify-launch.mjs`（要 `ws`，且 `loadWs()` 取 `m.default` 而不是 ESM 命名导出 `WebSocket`，用标准 npm `ws` 时 4 项窗口自查必失败）、
-`verify-page-fns.mjs` / `verify-web-tools.mjs`（会拉无头 Chromium 做 CDP 实测，CI 里不许起真浏览器）。
+
+- `verify-host.mjs` —— 会**真的拉起浏览器**：`browser_open{gui:true}` 在有 Chromium 的机器上断言的是"启动成功"，
+  CI runner 自带 Edge ⇒ 会弹真窗口、走真 CDP。
+- `verify-page-fns.mjs` / `verify-web-tools.mjs` —— 会拉无头 Chromium（Edge/Chrome）做 CDP 实测，
+  测试期不许起真浏览器、不许做真实下载。
+
+> v0.12.1 之前这 6 套（bridge / bridge-v2 / extension / browsers / result-cap / launch）是因为
+> **缺 npm `ws` 包**被排除的；现在 `ws` 进了 `devDependencies`，CI 装依赖那一步就把它装好了。
 
 ## 换台机器：可迁移性与**必须手动的步骤**
 

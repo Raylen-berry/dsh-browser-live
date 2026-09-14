@@ -1,20 +1,30 @@
 name: CI
 
-# 发布前检查：push / PR 都跑同一套离线测试，任一环节非 0 退出即整体失败。
+# 发布前检查：push / PR 都跑同一套测试，任一环节非 0 退出即整体失败。
 #
 # 为什么是 windows-latest：本插件驱动 Windows 上的 Chrome/Edge，套件在 Windows 上实测通过
 #   （本机无 WSL 发行版，Linux/macOS 未实测 ⇒ 不放进 CI 冒红）。
-# 为什么是 20/22/24 矩阵：仓库没写 engines，按 20 = 最老仍常见的 LTS、22 = 当前 LTS、
-#   24 = DSH Desktop 实际内置的运行时（本机 DSH 自带的 node 就是 v24.9.0）；
-#   三档已用**独立下载的** node 在干净环境逐套实测通过。
+# 为什么矩阵是 22/24 而**没有 20**（这一点本轮实测纠正过一次）：
+#   · 本仓库的"无 ws 包就退回 globalThis.WebSocket"那条路，以及扩展代码
+#     `extension/background.js` 里的裸 `new WebSocket(...)`，都依赖**全局 WebSocket**；
+#     Node 20 没有这个全局对象（实测 node20 globalThis.WebSocket = undefined，
+#     node22/24 = function）⇒ verify-extension / verify-browsers / verify-result-cap 三套在 Node 20 上
+#     必红（干净环境实测：8/8 语法门禁过，套件 9/12，verify-result-cap 49 passed / 18 failed）。
+#   · 所以矩阵写 22（当前 LTS）与 24（DSH Desktop 实际内置的运行时，本机就是 v24.9.0），
+#     并在 package.json 里声明 engines.node >= 22 —— 不是"把红的藏起来"，而是把真实下限写进 manifest。
+#   · 三档已用**独立下载的** node 在干净环境逐套实测：22 与 24 均为 8/8 + 12/12 通过。
 #
-# 全程不联网跑测试：不起真浏览器、不做真实下载、不调真实模型。
+# 【测试执行期间不出网 —— 这条是硬约束，加依赖安装步骤**不**放宽它】
+#   · 允许出网的只有下面 `npm ci` 那一步：它按 package-lock.json 把 devDependencies（就是 ws）装下来。
+#   · `npm test` 本身（node tools/run-all.mjs）**不许有任何网络访问**：不做真实下载、不调真实模型、
+#     不起真浏览器、不读本机 DSH 安装目录。
+#   · 所以需要"真 Chromium 做 CDP 实测"的套件仍然排除在外（见下），需要 %APPDATA% 下真实配置的更是。
+#   · 依赖是**装出来**的（这一步已经装完），不是测试运行时现下载的 —— 两者的区别就是这条约束的边界。
+#
 # 已排除的套件与原因（详见 tools/run-all.mjs 的 EXCLUDED，`node tools/run-all.mjs --list` 可打印）：
-#   · verify-bridge / verify-bridge-v2 / verify-extension —— 要 npm 的 ws 包（本机从 DSH 安装目录解析到）
-#   · verify-host —— 同上，且断言 browser_open{gui:true} 成功，本机真有 Chromium 时会拉起**真浏览器**
-#   · verify-launch —— 要 ws；且 loadWs() 取 m.default 而不是 ESM 命名导出，标准 npm ws 下 4 项窗口自查必失败
-#   · verify-result-cap —— 要 ws（真链路那段读桥的 bridge.json，无 ws 时桥起不来）
-#   · verify-page-fns / verify-web-tools —— 会拉真 Chromium 做 CDP 实测，CI 里不许
+#   · verify-host —— 会**真的拉起浏览器**：browser_open{gui:true} 在有 Chromium 的机器上断言"启动成功"，
+#     windows-latest runner 自带 Edge ⇒ 会弹真窗口、走真 CDP
+#   · verify-page-fns / verify-web-tools —— 会拉无头 Chromium（Edge/Chrome）做 CDP 实测
 on:
   push:
   pull_request:
@@ -25,12 +35,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: [20, 22, 24]
+        node-version: [22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-      # npm test = node tools/run-all.mjs：8 项语法门禁 + 6 套离线套件，每套都跑完再汇总，
-      # 任一套失败 ⇒ 退出码 1。测试不需要任何依赖，所以没有 npm install（离线可跑）。
+          cache: npm
+      # 只装 devDependencies（package-lock.json 已提交 ⇒ 用 ci 保证与本地逐字节一致）。
+      # .npmrc 里开了 legacy-peer-deps：peerDependencies 是**宿主 DSH 运行时**提供的
+      # （@deepseek-ai/cordis、dsh-tools、react…），测试一个都不需要；不关掉的话 npm 7+
+      # 会自动去装那一整套 35 个包，等于让一个零外部依赖的插件把 CI 押在宿主发布状态上。
+      - run: npm ci --no-audit --no-fund
+      # npm test = node tools/run-all.mjs：8 项语法门禁 + 12 套测试，每套都跑完再汇总，
+      # 任一套失败 ⇒ 退出码 1。这一步**不出网**。
       - run: npm test

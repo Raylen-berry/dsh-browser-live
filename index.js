@@ -329,8 +329,20 @@ export function withAudit(tool) {
 // 传输层：优先 npm 'ws'（Chrome DevTools 实战最稳，禁 permessage-deflate 避开
 // Node 内置 undici WebSocket 与 Chrome 的 1006 互操作坑）；解析不到再退回全局 WebSocket。
 
-async function loadWs() {
-  const candidates = ['ws']
+/**
+ * 测试缝：`DSH_BROWSER_LIVE_WS` 给的候选插到最前面。
+ * 带盘符/斜杠的当**直接文件路径**（走 ② 那种 shape），否则当**裸包名**（走 ① 那种 shape）——
+ * tools/verify-launch.mjs 正是靠它用临时目录把两种布局各测一遍，不必依赖本机装没装 ws。
+ */
+function wsCandidatesFromEnv() {
+  const raw = String(process.env.DSH_BROWSER_LIVE_WS || '').trim()
+  if (!raw) return []
+  const list = raw.split(path.delimiter).filter(Boolean)
+  return list.map((c) => (/[\\/]/.test(c) ? pathToFileURL(c).href : c))
+}
+
+export async function loadWs() {
+  const candidates = [...wsCandidatesFromEnv(), 'ws']
   try { candidates.push(pathToFileURL(path.join(dshHome(), 'profiles', 'node_modules', 'ws', 'index.js')).href) } catch { /* ignore */ }
   try {
     // ① exe 在 <app>/node_modules/node/bin → 上两级即 <app>/node_modules
@@ -342,14 +354,23 @@ async function loadWs() {
     if (process.env.APPDATA) candidates.push(pathToFileURL(path.join(process.env.APPDATA, 'dsh-desktop', 'harness', 'profiles', 'node_modules', 'ws', 'index.js')).href)
   } catch { /* ignore */ }
   for (const c of candidates) {
-    try { const m = await import(c); const W = m && (m.default || m); if (typeof W === 'function') return W } catch { /* next */ }
+    try {
+      const m = await import(c)
+      // 两种布局的导出形状不同，必须分开取（这里曾用 `m.default || m`，只在其中一种下对）：
+      //   ① 裸包名 'ws'（走 package.json 的 exports → ESM wrapper）：有**具名导出** WebSocket，
+      //      default 是 CommonJS module.exports 本身 —— 它上面**没有** .WebSocket ⇒ `m.default.WebSocket` 是
+      //      undefined，解构出来就是"WebSocket 不可用"（干净机器/CI 装好 npm ws 后照样报）。
+      //   ② 直接文件路径（DSH 安装目录那种布局）：default = module.exports，上面带自引用 .WebSocket ⇒ 可用。
+      const W = m?.WebSocket ?? m?.default?.WebSocket ?? m?.default
+      if (typeof W === 'function') return W
+    } catch { /* next */ }
   }
   return null
 }
 
 /** 解析 'ws' 包本体（需要 WebSocketServer 起桥），与 loadWs 同款候选路径。 */
 async function loadWsModule() {
-  const candidates = ['ws']
+  const candidates = [...wsCandidatesFromEnv(), 'ws']
   try { candidates.push(pathToFileURL(path.join(dshHome(), 'profiles', 'node_modules', 'ws', 'index.js')).href) } catch { /* ignore */ }
   try {
     const appNm = path.join(path.dirname(process.execPath), '..', '..')
@@ -361,11 +382,10 @@ async function loadWsModule() {
   for (const c of candidates) {
     try {
       const m = await import(c)
-      const W = m && (m.default || m)
-      const WSS = m?.WebSocketServer || W?.WebSocketServer
+      // 与 loadWs() 同一套形状差异：裸包名有具名导出，直接路径要从 default 上取（见 loadWs 的注释）。
+      const W = m?.WebSocket ?? m?.default?.WebSocket ?? m?.default
+      const WSS = m?.WebSocketServer ?? m?.default?.WebSocketServer ?? W?.WebSocketServer
       if (typeof W === 'function' && typeof WSS === 'function') return { WebSocket: W, WebSocketServer: WSS }
-      // CJS 具名导出：{ WebSocket, WebSocketServer }
-      if (typeof m?.WebSocket === 'function' && typeof WSS === 'function') return { WebSocket: m.WebSocket, WebSocketServer: WSS }
     } catch { /* next */ }
   }
   return null
@@ -844,9 +864,12 @@ export async function reportWindowState(port) {
     const list = await fetch(`http://127.0.0.1:${port}/json/list`).then((r) => r.json())
     const page = (list || []).find((t) => t.type === 'page' && t.webSocketDebuggerUrl)
     if (!page) return '⚠ 启动后自查：拿不到页面目标，无法确认窗口'
-    const { WebSocket } = await loadWs()
-    if (!WebSocket) return '⚠ 启动后自查：WebSocket 不可用'
-    const ws = new WebSocket(page.webSocketDebuggerUrl)
+    // loadWs() 返回的就是 WebSocket 构造器本身（不是"带 WebSocket 属性的模块"）——
+    // 这里散开写会从构造器上取静态属性，两种布局下都取不到（改动前靠直接路径布局里
+    // `WebSocket.WebSocket = WebSocket` 的自引用才"碰巧能用"，换裸包名布局就必报不可用）。
+    const WS = await loadWs()
+    if (!WS) return '⚠ 启动后自查：WebSocket 不可用'
+    const ws = new WS(page.webSocketDebuggerUrl)
     let id = 0
     const pending = new Map()
     ws.onmessage = (ev) => { try { const m = JSON.parse(ev.data); if (m.id && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id) } } catch { /* ignore */ } }

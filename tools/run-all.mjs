@@ -7,8 +7,10 @@
 // 为什么不用 `npm test = a.mjs && b.mjs && ...`（本仓库原来就是那样）：第一套一失败后面的根本不跑，
 // 一次 push 只能暴露一个错误。这里每套都跑、逐套列结果，任一套非 0 退出 ⇒ 本进程退出码 1 ⇒ CI 变红。
 //
-// 本清单只含**离线套件**：不联网、不起真浏览器、不读本机 DSH 安装目录。
-// 需要真浏览器或 npm 'ws' 包的套件写在 EXCLUDED 里（含原因），不参与 CI。
+// 本清单只含**离线套件**：测试执行期间**不联网**（不做真实下载、不调真实模型）、不起真浏览器。
+// 需要真浏览器（拉 CDP 实测）的套件写在 EXCLUDED 里（含原因），不参与 CI。
+// 需要 npm 'ws' 包的 6 套**在**这里：ws 由 package.json 的 devDependencies 声明，
+// CI 的依赖安装步骤（npm ci）装好、本机 npm install 装好 —— 依赖是"装出来"的，不是"测试时下载的"。
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -30,18 +32,23 @@ const SUITES = [
   'tools/verify-extension-v2.mjs',
   'tools/verify-launcher.mjs',
   'tools/verify-manifest.mjs',
+  // 以下 6 套要测试用的 npm 'ws' 包（已在 package.json 的 devDependencies 里声明，
+  // CI 由 `npm ci` 装出、本机由 `npm install` 装出）—— 2026-09 从 EXCLUDED 挪回。
+  // 它们在**干净环境**（DSH_HOME/APPDATA/LOCALAPPDATA/USERPROFILE 指空目录）实测通过。
+  'tools/verify-bridge.mjs',        // 23 项
+  'tools/verify-bridge-v2.mjs',     // 74 项
+  'tools/verify-extension.mjs',     // 77 项
+  'tools/verify-browsers.mjs',      // 35 项
+  'tools/verify-result-cap.mjs',    // 67 项
+  'tools/verify-launch.mjs',        // 24 项；其中 4 项窗口自查依赖 loadWs 的产品缺陷修复（见 index.js）
 ]
 
 const EXCLUDED = [
-  ['tools/verify-bridge.mjs', '要 npm 的 ws 包：index.js 的 loadWsModule() 从 DSH 安装目录解析，CI 里没有（离线报“解析不到 ws 包”）'],
-  ['tools/verify-bridge-v2.mjs', '同上：要 ws 包'],
-  ['tools/verify-extension.mjs', '同上：要 ws 包'],
-  ['tools/verify-host.mjs', '要 ws 包；且它断言 browser_open{gui:true} 成功，本机真有 Chromium 时会**拉起真浏览器**'],
-  ['tools/verify-launch.mjs', '要 ws 包；且 loadWs() 取的是 m.default 而不是 ESM 命名导出 WebSocket ⇒ 用标准 npm ws 解析时 4 项窗口自查必失败（13 passed / 4 failed，本机以独立 node + npm ws 复现）'],
-  ['tools/verify-browsers.mjs', '要 ws 包：真 BridgeServer + 桥会话（无 ws 时桥起不来）'],
-  ['tools/verify-result-cap.mjs', '要 ws 包（真链路那段要读桥的 bridge.json，无 ws 时桥起不来 ⇒ ENOENT）'],
-  ['tools/verify-page-fns.mjs', '会拉无头 Chromium（Edge/Chrome）做 CDP 实测 —— CI 里不许起真浏览器'],
-  ['tools/verify-web-tools.mjs', '同样会拉真 Chromium；且离线缺 ws 时本机复现 42 通过 / 2 失败'],
+  ['tools/verify-host.mjs',
+    '要 ws 包；且它**会真的拉起浏览器**：本机有 Chromium 时 browser_open{gui:true} 断言的是"启动成功"（真窗口），' +
+    '没 Chromium 时才走"预期失败"那一支。CI runner（windows-latest）自带 Edge ⇒ 会拉起真浏览器，违反"测试期不出网/不起真浏览器"。'],
+  ['tools/verify-page-fns.mjs', '会拉无头 Chromium（Edge/Chrome）做 CDP 实测 —— 测试期不许起真浏览器、不许做真实下载'],
+  ['tools/verify-web-tools.mjs', '同样会拉真 Chromium 做 CDP 实测 —— 同上'],
 ]
 
 const ENV = {}
@@ -53,12 +60,9 @@ const ENV = {}
 const DISCOVERY = (n) => /^(verify|test|probe)-.*\.mjs$/.test(n) || n === 'selfcheck.mjs'
 
 // 已知失败：仍然跑、结果照列，但**不**让整体变红（每条都必须写明原因）。
-const KNOWN_FAILING = [
-  ['tools/verify-manifest.mjs',
-    '既有失败（本任务改动造成）：它读 package.json 的 scripts.test 字符串，断言每个 verify-*.mjs 都**逐个出现在那个长串里**；' +
-    '改成 tools/run-all.mjs 汇总入口后这条耦合失效 ⇒ 14 项「npm test 覆盖了 X」失败（另 17 项仍通过）。' +
-    '同一个不变量（不许静默漏跑套件）已由本文件的 DISCOVERY 登记自检承担；口径未改、也请勿为变绿去改它的断言。'],
-]
+const KNOWN_FAILING = []
+// （verify-manifest.mjs 曾因"断言 package.json 的 scripts.test 长串"过时而进这里；
+//   2026-09 已把它的口径改成检查本文件的三个清单，等价且更强，于是挪回 SUITES。详见该文件内注释。）
 
 // ---- 执行器 ---------------------------------------------------------------
 const results = []
