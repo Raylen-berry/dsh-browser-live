@@ -304,7 +304,7 @@ v0.9.0 起，**每一次 `browser_*` 工具调用**（含 `browser_open` / `brow
 和"普通输入必须还能看到原文"两条），跑法：
 
 ```powershell
-node tools/verify-audit-redact.mjs   # 期望 PASS 52 项
+node tools/verify-audit-redact.mjs   # 期望 PASS 56 项
 ```
 
 收口点只有一个：所有工具都在 `index.js` 的注册循环里被 `withAudit()` 包了一层
