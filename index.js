@@ -1603,9 +1603,135 @@ function makeTool(definer) {
   return tool
 }
 
+// ------------------------------------------------------- 结果收口（安全阀） --
+//
+// 单次结果的字符上限。**超了就在序列化之前裁剪，绝不切 JSON 串。**
+//
+// 为什么必须前置裁剪：工具自己声明的额度是"正文最多 N 字符"，而外层这道安全阀原先切的是
+// **序列化之后的字符串**。两者一叠加就是"坏 JSON"：3 万字材料下调用方拿到的是被拦腰切断的
+// 串（JSON.parse 直接抛），而且续读信息（offset / charsStart / next）正好落在切口之后 ——
+// 于是"内容长、请续读"变成了"结果坏了、也没法续读"。
+//
+// 现在的口径：
+//   · MAX_TEXT_CHARS   = 正文类字段（text/value）的单次上限 —— 工具声明里的 limit 上限就是它；
+//   · MAX_RESULT_CHARS = 整个结果的硬上限（正文 + 元信息 + 链接清单……全算进去）；
+//   · 两者之差是留给包装开销的余量，所以"正文按上限取满"时整体仍进限额；
+//   · 万一还是超（链接清单特别大之类），fitResult() 继续从尾部裁剪别的字段，
+//     并把"截了什么 / 原始多长 / 下次从哪续读"写进结果本身 —— 返回值永远是合法 JSON。
+export const MAX_TEXT_CHARS = 20000
+export const MAX_RESULT_CHARS = 24000
+
+/** 承载"正文"的字段（按优先级）。 */
+const TEXT_FIELDS = ['text', 'value']
+/** 承载"成片行数据"的字段：超限时从尾部整条丢，并记账（不切断条目内部结构）。 */
+const LIST_FIELDS = ['links', 'rows', 'headings', 'elements', 'items', 'tabs', 'downloads']
+
+const jsonLen = (v) => JSON.stringify(v).length
+
+/** 段落边界回退：能落在换行处就落在换行处，别把句子拦腰切断（收边损失 ≤40% 才收）。 */
+function cutAtBoundary(s, budget) {
+  if (budget <= 0) return ''
+  if (s.length <= budget) return s
+  const head = s.slice(0, budget)
+  const at = Math.max(head.lastIndexOf('\n\n'), head.lastIndexOf('\n'))
+  return at >= Math.floor(budget * 0.6) ? head.slice(0, at + 1) : head
+}
+
+/** 续读基点：browser_read 用 charsStart（段落感知的真实起点），browser_text 用 offset。 */
+function resumeBase(o) {
+  if (typeof o.charsStart === 'number') return o.charsStart
+  if (typeof o.offset === 'number') return o.offset
+  return 0
+}
+
+/**
+ * 把工具结果裁进 maxChars，**返回值仍是合法 JSON 结构**（只是字段被裁短 / 被记账）。
+ * 短结果原样返回（不加任何字段）—— 修这个 bug 不能顺手改变正常路径的形状。
+ * 记账口径（全部在结果里，可核查）：truncated / truncation.originalChars（正文原始长度）/
+ * truncation.originalResultChars（整串原始长度）/ truncation.nextOffset（下次从哪续读）/ next。
+ */
+export function fitResult(v, maxChars = MAX_RESULT_CHARS) {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) return v
+  const before = jsonLen(v)
+  if (before <= maxChars) return v
+  const out = { ...v }
+  const fields = []
+  const marker = { limit: maxChars, originalResultChars: before }
+  const listKeys = LIST_FIELDS.filter((k) => Array.isArray(out[k]) && out[k].length)
+  // ---- ① 正文：按"扣掉包装开销（含把行数据全丢掉的极端情形）"的预算裁 text/value ----
+  // 顺序刻意是"先裁正文、后丢行数据"：反过来的话，一个特别大的链接清单会把正文的预算挤成 0，
+  // 于是正文被整段丢掉、链接清单反而留着 —— 对读长文来说这是最坏的结果。
+  const key = TEXT_FIELDS.find((k) => typeof out[k] === 'string' && out[k].length)
+  if (key) {
+    const orig = out[key]
+    // 400 是给下面这些记账字段（truncated/truncation/next）预留的余量
+    const overhead = jsonLen({ ...out, [key]: '', ...Object.fromEntries(listKeys.map((k) => [k, 0])) }) + 400
+    const kept = cutAtBoundary(orig, maxChars - overhead)
+    out[key] = kept
+    const nextOffset = resumeBase(out) + kept.length
+    marker.field = key
+    marker.originalChars = orig.length
+    marker.keptChars = kept.length
+    marker.nextOffset = nextOffset
+    fields.push({ field: key, originalChars: orig.length, keptChars: kept.length })
+    // 续读提示只在"正文真的被裁了"或"页面本来就还有内容"时给 —— 免得正文完整却被催着续读
+    if (kept.length < orig.length || out.truncated === true || out.more === true) {
+      out.more = true
+      out.next = '还有内容：用 offset=' + nextOffset + ' 续读'
+    }
+  }
+  // ---- ② 正文裁完仍超：从尾部整条丢"成片行数据"（丢了几条要记账） ----
+  for (const k of listKeys) {
+    if (jsonLen(out) <= maxChars) break
+    const arr = out[k]
+    const orig = arr.length
+    let keep = orig
+    while (keep > 0 && jsonLen({ ...out, [k]: arr.slice(0, keep) }) > maxChars) keep = keep > 1 ? Math.floor(keep / 2) : 0
+    if (keep < orig) {
+      out[k] = arr.slice(0, keep)
+      out[k + 'Dropped'] = orig - keep
+      fields.push({ field: k, original: orig, kept: keep })
+    }
+  }
+  // ---- ③ 兜底：还有别的长字段（超长 url、异常大的对象等）就从最长的开始裁 ----
+  for (let guard = 0; jsonLen(out) > maxChars && guard < 50; guard++) {
+    const cands = Object.keys(out)
+      .filter((k) => k !== 'truncation' && !k.endsWith('Dropped'))
+      .map((k) => [k, jsonLen(out[k])])
+      .filter(([, n]) => n > 64)
+      .sort((a, b) => b[1] - a[1])
+    if (!cands.length) break
+    const [k, n] = cands[0]
+    const val = out[k]
+    if (typeof val === 'string') { fields.push({ field: k, originalChars: val.length, keptChars: 0 }); out[k] = '' }
+    else if (Array.isArray(val)) { fields.push({ field: k, original: val.length, kept: 0 }); out[k] = [] }
+    else if (val && typeof val === 'object') { fields.push({ field: k, originalChars: n, keptChars: 0 }); out[k] = {} }
+    else break
+  }
+  // ---- 记账：截断必须显式，不能静默丢 ----
+  out.truncated = true
+  out.truncation = {
+    ...marker,
+    truncated: true,
+    fields,
+    note: '结果超过单次上限：已在序列化前裁剪（不是把 JSON 切断）。用更小的 limit，或用 truncation.nextOffset 续读。',
+  }
+  // 记账字段本身也要能塞进限额；实在塞不下就给一个最小信封 —— 仍然是合法 JSON，且带续读位置
+  if (jsonLen(out) > maxChars) {
+    return {
+      ok: out.ok !== false,
+      truncated: true,
+      next: out.next,
+      truncation: { ...out.truncation, fields: [], note: '结果过大：正文与长字段已省略。用更小的 limit 或 offset 分段取。' },
+    }
+  }
+  return out
+}
+
 function safeJson(v) {
-  const s = typeof v === 'string' ? v : JSON.stringify(v, null, 0)
-  return s.length > 24000 ? s.slice(0, 24000) + '\n…(截断，必要时用 browser_eval 取局部)' : s
+  // 字符串型结果：超限时也给一个带记账的信封，而不是留一个被切断的串
+  if (typeof v === 'string') return v.length > MAX_RESULT_CHARS ? JSON.stringify(fitResult({ ok: true, text: v })) : v
+  return JSON.stringify(fitResult(v, MAX_RESULT_CHARS))
 }
 
 // ------------------------------------------------------------- tools
@@ -2166,7 +2292,7 @@ function buildTools(t) {
 
   tools.push(t({
     name: 'browser_eval',
-    description: '在页面上下文执行 JS 表达式（IIFE，如 "(()=>{...})()"），returnByValue+awaitPromise，结果 JSON 截断 24k。适合取正文片段、读 location、操作 window 上插件自身登记的辅助对象；常规交互优先用 snapshot/click/type。',
+    description: '在页面上下文执行 JS 表达式（IIFE，如 "(()=>{...})()"），returnByValue+awaitPromise，结果超过 24000 字符会在**序列化前**结构化截断（结果里带 truncated/truncation 说明保留了多少，不是把 JSON 切断）。适合取正文片段、读 location、操作 window 上插件自身登记的辅助对象；常规交互优先用 snapshot/click/type。',
     parameters: { expression: { type: 'string', required: true, description: '单个 JS 表达式' }, awaitPromise: { type: 'boolean', description: 'true=await（默认 false）' } },
     async execute(args) {
       const tab = await selectedTab()
@@ -2181,13 +2307,13 @@ function buildTools(t) {
     parameters: {
       selector: { type: 'string', description: 'CSS 选择器，默认 body' },
       offset: { type: 'number', description: '起始字符偏移，默认 0' },
-      limit: { type: 'number', description: '最多字符，默认 8000，上限 40000' },
+      limit: { type: 'number', description: `最多字符，默认 8000，上限 ${MAX_TEXT_CHARS}（单次正文上限；整个结果另有 ${MAX_RESULT_CHARS} 字符硬上限，超出时正文会在序列化前显式截断，结果里给出 truncation.nextOffset 续读）` },
     },
     async execute(args) {
       const tab = await selectedTab()
       const sel = args.selector || 'body'
       const off = Math.max(0, args.offset || 0)
-      const lim = clamp(args.limit || 8000, 200, 40000)
+      const lim = clamp(args.limit || 8000, 200, MAX_TEXT_CHARS)
       const r = await evaluate(tab, '(function(){var e=document.querySelector(' + JSON.stringify(sel) + ');var t=e?(e.innerText||""):null;return {found:t!==null,len:t?t.length:0,text:t?t.slice(' + off + ',' + off + '+' + lim + '):""}})()')
       if (!r.found) return { ok: false, error: 'selector 未命中: ' + sel }
       return { url: await evaluate(tab, 'location.href'), length: r.len, offset: off, text: r.text, more: r.len > off + r.text.length }
@@ -2209,7 +2335,7 @@ function buildTools(t) {
     parameters: {
       selector: { type: 'string', description: '限定读取范围的 CSS 选择器（不给则自动找正文）' },
       offset: { type: 'number', description: '起始字符偏移，默认 0（段落感知，续读用它）' },
-      limit: { type: 'number', description: '最多字符，默认 8000，上限 40000' },
+      limit: { type: 'number', description: `最多字符，默认 8000，上限 ${MAX_TEXT_CHARS}（单次正文上限；整个结果另有 ${MAX_RESULT_CHARS} 字符硬上限，超出时正文会在序列化前显式截断，结果里给出 truncation.nextOffset 续读）` },
       format: { type: 'string', description: "md（默认，结构化 Markdown）| text（纯文本）" },
       links: { type: 'boolean', description: '是否返回链接清单，默认 true' },
       linkLimit: { type: 'number', description: '链接条数上限，默认 30，上限 100' },
@@ -2220,7 +2346,7 @@ function buildTools(t) {
       const spec = {
         selector: args.selector ? String(args.selector) : '',
         offset: Math.max(0, Number(args.offset) || 0),
-        limit: clamp(Number(args.limit) || 8000, 200, 40000),
+        limit: clamp(Number(args.limit) || 8000, 200, MAX_TEXT_CHARS),
         format: String(args.format || 'md').toLowerCase() === 'text' ? 'text' : 'md',
         links: args.links !== false,
         linkLimit: clamp(Number(args.linkLimit) || 30, 1, 100),

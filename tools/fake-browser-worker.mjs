@@ -13,10 +13,18 @@
 //   → {type:'call.done', id, ok, value|error}
 //   ← {type:'dump', id}
 //   → {type:'dump.done', id, state:{kinds:[],calls:{},origins:[],connected:bool,lastError:''}}
+//
+// workerData 可选扩展（默认缺省 = verify-browsers 的老行为，一个字都不变）：
+//   pageText  : 一个超长正文字符串。给了它就进"长页模式" —— Runtime.evaluate 会把**工具真正
+//               生成的那个表达式**放进 node:vm，配一个只有 document.querySelector 的假 DOM 真跑一遍。
+//               这样 browser_text 的 offset/limit 语义（含 clamp）是被真代码执行的，而不是替身自己算的；
+//               READ_FN（readPageInPage）另给一份按 offset/limit 切的、字段名与真实现一致的载荷。
+//   readLinks : 长页模式下 links 清单的条数（用来造"元信息撑爆结果上限"的场景）。
 import { parentPort, workerData } from 'node:worker_threads'
 import { pathToFileURL } from 'node:url'
+import vm from 'node:vm'
 
-const { extDir, kind, ua, tabs } = workerData
+const { extDir, kind, ua, tabs, pageText, readLinks } = workerData
 
 const state = {
   kind, ua, tabs,
@@ -27,6 +35,33 @@ const state = {
   lastError: '',
 }
 const find = (id) => state.tabs.find((x) => x.id === id)
+
+// ---- 长页模式的三个小工具（只在 workerData.pageText 存在时用到） ----------------
+/** 取 callOnPage 生成表达式的尾参：'(FN)(a,b)' → [a, b]。 */
+function trailingArgs(ex) {
+  const at = ex.lastIndexOf(')(')
+  if (at < 0) return null
+  try { return JSON.parse('[' + ex.slice(at + 2, ex.length - 1) + ']') } catch { return null }
+}
+/** 假 DOM：只够 browser_text / browser_eval 这类"取正文"的表达式真跑一遍。 */
+const fakePageRealm = () => ({
+  document: {
+    title: `${kind} 长页 · 30000 字`,
+    body: { innerText: pageText, textContent: pageText },
+    querySelector: () => ({ innerText: pageText, textContent: pageText }),
+    querySelectorAll: () => [],
+  },
+  location: { href: `https://${kind}.test/p` },
+  window: {},
+})
+/** 造一份"很占地方"的链接清单：用来验证结果超限时元信息会被显式裁剪（而不是切断 JSON）。 */
+function mkLinks(n) {
+  const out = []
+  for (let i = 0; i < (Number(n) || 0); i++) {
+    out.push({ text: `${kind} 链接 ${i} ` + '标'.repeat(110), url: `https://${kind}.test/a/${i}/` + 'x'.repeat(260) })
+  }
+  return out
+}
 
 /** 记账数组用 Proxy 包一层：改了就顺手把快照 postMessage 回主线程（主线程只做断言）。 */
 const shadow = { calls: { attach: [], detach: [], sendCommand: [], badge: [], tabsUpdate: [], windowsUpdate: [] } }
@@ -87,15 +122,43 @@ globalThis.chrome = {
         url: `https://${kind}.test/p`, title: `${kind} page`, vw: 1280, vh: 720,
         scrollY: 0, docHeight: 1800,
         elements: [{ ref: 'e1', tag: 'input', text: `${kind}-书籍ID`, x: 100, y: 200 }],
-        text: `hello from ${kind} browser`, textMore: false,
+        text: pageText !== undefined ? pageText.slice(0, 40000) : `hello from ${kind} browser`,
+        textMore: pageText !== undefined ? pageText.length > 40000 : false,
       }
       if (method === 'Runtime.evaluate') {
         const ex = String(params?.expression || '')
         if (ex === 'location.href') return { result: { value: page.url } }
+        // 长页模式（见文件头注释）：先给 READ_FN 一份字段名一致的载荷，其余表达式丢进 vm 真跑
+        if (pageText !== undefined) {
+          if (/function readPageInPage/.test(ex)) {
+            const spec = (trailingArgs(ex) || [])[0] || {}
+            const off = Math.max(0, Number(spec.offset) || 0)
+            // 上限刻意交给**工具层**去管（替身只按 spec.limit 切，最多 40000 = 改前声明的额度）：
+            // 这样"声明上限与实际行为不一致"才能在真链路上被断言抓到，而不是被替身自己夹平。
+            const lim = Math.max(200, Math.min(Number(spec.limit) || 8000, 40000))
+            const cut = pageText.slice(off, off + lim)
+            return {
+              result: {
+                value: {
+                  ok: true, url: page.url, title: `${kind} 长页 · 30000 字`, lang: 'zh-CN', charset: 'UTF-8',
+                  source: 'article',
+                  meta: { description: '长页 fixture', siteName: 'fake', author: '', published: '', type: 'article' },
+                  textLength: pageText.length, offset: off, charsStart: off,
+                  truncated: off + cut.length < pageText.length, text: cut,
+                  ...(spec.links === false ? {} : { links: mkLinks(readLinks) }),
+                },
+              },
+            }
+          }
+          try {
+            const value = vm.runInNewContext(ex, fakePageRealm())
+            return { result: { value: value === undefined ? null : JSON.parse(JSON.stringify(value)) } }
+          } catch { /* 替身跑不了（snapshot 之类要真 DOM）→ 落到下面的老分支 */ }
+        }
         // 顺序要紧：SNAPSHOT_FN 里同时含 'function vis(e)' 与 'innerText'，
         // 先判 innerText 会把 snapshot 误当成取正文
         if (/function vis\(e\)/.test(ex)) return { result: { value: page } }
-        if (/innerText/.test(ex)) return { result: { value: { found: true, len: 25, text: page.text } } }
+        if (/innerText/.test(ex)) return { result: { value: { found: true, len: page.text.length, text: page.text } } }
         return { result: { value: null } }
       }
       if (method === 'Page.captureScreenshot') return { data: 'UE5HRA==' }

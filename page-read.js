@@ -424,7 +424,11 @@ export function readPageInPage(args) {
       body = jl.articleBody
       fallbackUsed = true
     }
-    var lim = Math.max(200, Math.min(Number(args.limit) || 8000, 40000))
+    // 单次正文上限 20000，与 index.js 的 MAX_TEXT_CHARS 一致 —— 这个函数是**注入到页面里**的
+    // （源串 toString() 后送进去），所以只能写死字面量，读不到模块级常量。
+    // 声明与实际必须一致：原来这里写 40000，而外层结果上限只有 24000，于是 3 万字材料下
+    // 序列化结果被拦腰切断 ⇒ 坏 JSON + 续读信息丢失。tools/verify-result-cap.mjs 钉住这条一致。
+    var lim = Math.max(200, Math.min(Number(args.limit) || 8000, 20000))
     var cut = smartCut(body, Number(args.offset) || 0, lim)
     var res = {
       ok: true,

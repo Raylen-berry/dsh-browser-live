@@ -1,5 +1,51 @@
 # 变更记录
 
+## 0.12.1 — 长结果被截坏：超限改成"序列化前裁剪"，声明上限与实测对齐（20k 正文 / 24k 整体）
+
+缺陷（另一轮只读审计的发现，已自行核实并复现）
+  `browser_text` / `browser_read` 的 `limit` 声明"上限 40000"（`index.js:2184` / `2212`，
+  clamp 在 `2190` / `2223`，注入页面的 `READ_FN` 同样夹 40000，`page-read.js:427`），
+  而外层 `safeJson`（`index.js:1608`）切的是**序列化之后的字符串**：
+  `s.length > 24000 ? s.slice(0, 24000) + '\n…(截断…)' : s`。
+  两者一叠加，3 万字材料下的表现是：JSON **被拦腰切断、无法解析**，而且 `offset` / `charsStart`
+  这些续读信息正好落在切口之后 —— 一起丢失。用户看到的是坏 JSON，而不是"内容长、请续读"。
+  真链路复现（改前 worktree + 离线假浏览器，3 万字页面）：
+  `JSON.parse` → `Bad control character in string literal in JSON at position 24000 (line 1 column 24001)`。
+
+改了什么
+  1) `index.js`：`safeJson` 里的"切字符串"整段删掉，改成 `fitResult(v, maxChars)` —— **在序列化之前**
+     裁剪，返回值永远是合法 JSON；`safeJson` 只负责 `JSON.stringify`。新导出两个常量：
+     `MAX_TEXT_CHARS = 20000`（正文单次上限，也就是 `limit` 的声明上限）与
+     `MAX_RESULT_CHARS = 24000`（整个结果硬上限）。裁剪顺序是"先裁正文、后丢行数据"：
+     反过来的话，一个特别大的链接清单会把正文预算挤成 0，于是正文被整段丢掉、链接反而留着 ——
+     对读长文来说那是最坏的结果。（`tools/verify-result-cap.mjs` 的 A6/B4 钉住这条。）
+  2) 截断显式记账（不再静默丢，也不再靠一句"…(截断)"）：结果里带 `truncated`、
+     `truncation.originalChars`（正文原始长度）、`truncation.originalResultChars`（裁之前整串多长）、
+     `truncation.nextOffset`（下次从哪续读）、`next`（人话提示），以及 `truncation.fields`
+     （被裁的字段 / 丢了几条）与 `linksDropped` 这类计数。
+  3) **声明与实际一致**：`limit` 上限从走不通的 40000 调到 `MAX_TEXT_CHARS`（20000），
+     三处同一个数（工具 schema 说明、`index.js` 的 clamp、`page-read.js` READ_FN 的字面量 ——
+     注入函数读不到模块常量，所以有一条断言专门钉那个字面量）；`browser_eval` 的说明里那句
+     "结果 JSON 截断 24k"改成描述真行为。README 的"单次结果上限"一节同步。
+  4) 同一类问题的第二处（都一并修，走的就是 3) 这道收口）：`browser_scrape`（300 行 × 每格 400 字）、
+     `browser_search`（50 条 × 标题 200 + 摘要 400）、`browser_snapshot`（140 元素 + 2600 字正文）
+     都没有声明 40000，但同样会撑过 24000 —— 改前一样是被切断的坏 JSON，现在同样"合法 + 记账"。
+  5) 测试夹具（`tools/fake-browser-worker.mjs`）新增**可选**的"长页模式"（`workerData.pageText` /
+     `readLinks`，缺省时行为与 v0.12.0 完全一致）：把工具**真正生成的表达式**放进 `node:vm`
+     配一个假 DOM 真跑，于是 `browser_text` 的 offset/limit 语义是**真代码**执行的，不是替身自己算的。
+
+验证
+  - 新增 `tools/verify-result-cap.mjs`（**67 项全绿，离线、不起真浏览器**）：① 3 万字材料 ⇒ JSON 可解析、
+    长度受限而结构完整；② 带截断标记 + 原始长度 + 续读 offset；③ 续读一两次取完全文，
+    拼起来**逐字等于原文 30000 字**（不重不漏）；④ 短结果一个字都没变（防修过头）；
+    ⑤ 声明上限 == 实测上限 == READ_FN 字面量。另含 scrape/search/snapshot 三处同类形状。
+  - **反向验证**（`git worktree` 指到改前 HEAD，跑同一份断言，事后移除）：**55 failed / 12 passed**
+    （共 67）。真链路层跑的是改前的真代码，失败里最关键的那条正是缺陷本身：
+    `Bad control character in string literal in JSON at position 24000`；反向跑里有 3 条通过
+    属垫片语义所致（改前不导出 `fitResult` 与那两个常量，垫片按改前语义逐字照抄，于是
+    "声明 vs 声明"那几条自洽通过）—— 载荷性的断言（可解析 / 进限额 / 有记账 / 能续读）全红。
+  - `npm test` 全套：改前基线与本改动后均全绿（各套件数字见提交说明）。
+
 ## 0.12.0 — 尺度改成百分比；剩下的写死项清一遍；顺带修掉一个"静默重置"的真 bug
 
 用户的原话："我记得我之前说过要你把一些页面或者尺度作为百分比类的量，然后你这个浏览器观察窗的

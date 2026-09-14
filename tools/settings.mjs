@@ -84,7 +84,7 @@ if (cmd === 'show') {
   const { settings, notes } = validate(cur)
   const i = args.indexOf('--out')
   const out = i >= 0 ? args[i + 1] : path.join(process.cwd(), 'dsh-browser-live-settings-' + stamp().slice(0, 10) + '.json')
-  const payload = { format: FORMAT, plugin: PLUGIN, pluginVersion: '0.12.0', exportedAt: new Date().toISOString(), host: os.hostname(), settings }
+  const payload = { format: FORMAT, plugin: PLUGIN, pluginVersion: '0.12.1', exportedAt: new Date().toISOString(), host: os.hostname(), settings }
   fs.writeFileSync(out, JSON.stringify(payload, null, 2), 'utf8')
   console.log('已导出 ' + out)
   console.log('  观察窗 ' + settings.liveView + ' · 面板 ' + settings.panelWidthPct + '%×' + settings.panelHeightPct + '%（宽屏 ' + settings.panelWidePct + '%）· fps ' + settings.fps + ' · 质量 ' + settings.quality + ' · 无头 ' + settings.headless + ' · 用户浏览器桥 ' + settings.userBridge + ' · 后端 ' + settings.backendMode)

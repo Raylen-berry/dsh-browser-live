@@ -102,6 +102,7 @@ node tools/settings.mjs import D:\bl-settings.json --yes   # 新机器（覆盖�
 
 ```powershell
 node tools/verify-audit.mjs         # 期望 PASS 15 项
+node tools/verify-result-cap.mjs    # 期望 67 passed / 0 failed（离线，不起真浏览器）
 node tools/verify-host.mjs          # 期望 73 passed / 0 failed（v0.10.0 起按"有/无真 Chromium"分两支断言）
 node tools/verify-audit-chain.mjs   # 期望 0 = 链完整（还没留痕时会跳过并返回 0）
 npm test                            # 全套；其中 verify-page-fns / verify-web-tools 会真起一个无头浏览器
@@ -167,10 +168,64 @@ npm test                            # 全套；其中 verify-page-fns / verify-w
 
 - **浏览器候选**（Edge → Chrome → Brave）：这几款是"你真的在用、且允许被驱动"的；路径可用 `chromePath` 覆盖。
 - **人机验证特征库**：属事实性数据；识别出来是"停下问人"，不该做成可配置开关。
-- **安全阀**：工具串行互斥、快照元素上限（140）、单次结果上限（读一段 40k 字符 / 抓 300 行）——
-  防止一次调用把上下文打爆的护栏，需要更多就用 `offset`/`limit` 分段取。
+- **安全阀**：工具串行互斥、快照元素上限（140）、单次结果上限（**整个结果 24k 字符**，其中正文单次
+  最多 20k —— 抓 300 行 / 搜 50 条这类额度也一样受它约束）—— 防止一次调用把上下文打爆的护栏，
+  需要更多就用 `offset`/`limit` 分段取。**超限时是在序列化之前裁剪**：结果仍是合法 JSON，且带着
+  `truncated` / `truncation.originalChars`（原始长度）/ `truncation.nextOffset`（下次续读的 offset）
+  与 `next` 提示 —— 绝不会把 JSON 拦腰切断，也不会静默丢内容。详见下面「单次结果上限」一节。
 - **面板的可读下限**：`min-width:min(280px,90vw)` —— 纯百分比在极窄窗口会把面板压到不可用；
   这个下限本身也随视口缩（90vw），不是固定像素。
+
+## 单次结果上限：声明与实际必须一致（超限在序列化前裁剪）
+
+**数字（只有这三个，别处引用它们）**
+
+| 量 | 值 | 含义 |
+|---|---|---|
+| `MAX_TEXT_CHARS` | **20000** | **正文**类字段（`text` / `value`）的单次上限 —— 也就是 `browser_text` / `browser_read` 的 `limit` 声明上限 |
+| `MAX_RESULT_CHARS` | **24000** | **整个结果**的硬上限（正文 + 元信息 + 链接清单……全算进去） |
+| 其它额度 | 抓 300 行 / 搜 50 条 / 快照 140 元素 | 行数类额度照旧，但它们产出的结果同样受 24000 约束 |
+
+**为什么要有这一节**：v0.12.0 之前，`browser_text` / `browser_read` 声明"`limit` 上限 40000"，
+而外层安全阀切的是**序列化之后的字符串**（`safeJson` 里 `slice(0, 24000)`）。两者一叠加就是坏结果：
+3 万字的页面上，调用方拿到的是被拦腰切断的串（`JSON.parse` 直接抛），而且 `offset` / `charsStart` 这些
+续读信息正好落在切口之后 —— "内容长、请续读"实际表现成"结果坏了、也没法续读"。
+
+**现在怎么走**
+
+- **声明 = 实测**：`limit` 上限就是 `MAX_TEXT_CHARS`（20000），三个地方用的是同一个数
+  （工具 schema 说明、`index.js` 的 clamp、注入到页面里的 `READ_FN` 的 clamp —— 页面内函数读不到模块常量，
+  所以 `tools/verify-result-cap.mjs` 里有一条断言专门钉住那个字面量）。
+- **在序列化之前裁剪**：正文按剩余预算（24000 减去元信息/链接等包装开销）先裁到段落边界；正文裁完还超，
+  就从尾部整条丢"成片行数据"（链接清单、抓取行），**丢了几条也记账**。返回值永远是合法 JSON。
+- **截断显式记账**（不再静默丢，也不再靠一句"…(截断)"）：
+
+  ```json
+  {
+    "text": "…（已保留的正文）",
+    "truncated": true,
+    "next": "还有内容：用 offset=20000 续读",
+    "truncation": {
+      "truncated": true, "limit": 24000,
+      "field": "text", "originalChars": 40000, "keptChars": 20000,
+      "originalResultChars": 45210,
+      "nextOffset": 20000,
+      "fields": [{ "field": "links", "original": 100, "kept": 12 }],
+      "note": "结果超过单次上限：已在序列化前裁剪（不是把 JSON 切断）。…"
+    },
+    "linksDropped": 88
+  }
+  ```
+
+- **续读**：照 `truncation.nextOffset`（或 `next` 里的 offset）接着读即可，分页不重不漏 ——
+  3 万字材料两次取完，拼起来与原文逐字一致。
+- **短结果一个字都没变**：没超限就原样返回、不加任何记账字段（`tools/verify-result-cap.mjs` 里
+  有"防修过头"断言钉住这两条）。
+
+**验证**：`node tools/verify-result-cap.mjs`（**67 项，离线、不起真浏览器**）—— 真 `apply()` + 真桥 +
+真扩展 + 一个 Worker 假浏览器（长页模式把工具**真正生成的表达式**放进 `node:vm` 真跑）：
+解析/限额/记账/续读链/短结果/声明一致，以及 `browser_scrape`、`browser_search`、`browser_snapshot`
+这三处同类组合（它们没声明 40000，但同样会撑过 24000，走的是同一道收口）。`npm test` 已包含它。
 
 ## 网页理解与搜索（v0.10.0）：读得懂、抓得到、搜得了
 
