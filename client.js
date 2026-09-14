@@ -60,6 +60,11 @@ window.__ModuleLoader__.load({
       '.bl-hd.bl-drag{cursor:grabbing}',
       '.bl-dot{width:8px;height:8px;border-radius:50%;corner-shape:round;background:#b9bfc9;flex:none}',
       '.bl-dot.on{background:#3fb96f;box-shadow:0 0 6px rgba(63,185,111,.9)}',
+      // 黄灯 = 浏览器还在跑，但画面已经断流（正在自动重连）。绿灯只代表"画面真的在更新"。
+      '.bl-dot.warn{background:#e0a63c;box-shadow:0 0 6px rgba(224,166,60,.85)}',
+      '.bl-status{flex:none;font-size:11px;color:#e0a63c;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:34%}',
+      // 画面上盖一条"这不是实时画面"，避免把最后一帧当成现场
+      '.bl-stale{position:absolute;left:50%;top:10px;transform:translateX(-50%);background:rgba(120,78,10,.86);color:#ffe9c2;border-radius:8px;padding:3px 10px;font-size:11px;line-height:16px;pointer-events:none;white-space:nowrap}',
       '.bl-title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600}',
       '.bl-url{flex:none;max-width:38%;color:var(--dsw-alias-label-tertiary,#888);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
       '.bl-btn{border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.3));background:transparent;color:inherit;border-radius:7px;height:22px;padding:0 8px;cursor:pointer;font-size:11px;flex:none}',
@@ -142,6 +147,11 @@ window.__ModuleLoader__.load({
       poll: null,
       stopBtnArmed: false,
       state: null,
+      // 画面健康（v0.13.0）：把"浏览器在不在"与"画面还在不在更新"分开记 ——
+      // 用户 2026-09-14 反馈：断流后绿灯还亮着，容易把最后一帧当成实时画面。
+      lastFrameAt: 0,     // 最近一帧到达的时刻（0 = 从没收到过）
+      streamError: false, // SSE 报过错、正在自动重连
+      health: null,       // 1s 心跳（只在面板开着时跑）
     }
     var els = {}
 
@@ -164,6 +174,7 @@ window.__ModuleLoader__.load({
         '  <span class="bl-dot" id="bl-dot"></span>',
         '  <span class="bl-title" id="bl-title">浏览器观察窗</span>',
         '  <span class="bl-url" id="bl-url"></span>',
+        '  <span class="bl-status" id="bl-status"></span>',
         '  <button class="bl-btn" id="bl-wide" title="加宽">↔</button>',
         '  <button class="bl-btn" id="bl-pop" title="弹出为独立网页（可拖到副屏、全屏）">⧉</button>',
         '  <button class="bl-btn" id="bl-min" title="收起成底部一条（不挡对话）">—</button>',
@@ -173,6 +184,7 @@ window.__ModuleLoader__.load({
         '<div class="bl-stage" id="bl-stage">',
         '  <img id="bl-img" alt="" draggable="false">',
         '  <div class="bl-empty" id="bl-empty">等待 agent 打开浏览器…<br>调用任意 browser_* 工具后这里会实时显示画面</div>',
+        '  <div class="bl-stale" id="bl-stale" hidden>⏸ 画面已停 · 最后更新于 <span id="bl-stale-age">0</span> 秒前</div>',
         '  <div class="bl-act" id="bl-act"></div>',
         '  <textarea class="bl-key" id="bl-key" spellcheck="false" autocomplete="off"></textarea>',
         '</div>',
@@ -189,6 +201,9 @@ window.__ModuleLoader__.load({
       els.dot = p.querySelector('#bl-dot')
       els.title = p.querySelector('#bl-title')
       els.url = p.querySelector('#bl-url')
+      els.status = p.querySelector('#bl-status')
+      els.stale = p.querySelector('#bl-stale')
+      els.staleAge = p.querySelector('#bl-stale-age')
       els.tabs = p.querySelector('#bl-tabs')
       els.stage = p.querySelector('#bl-stage')
       els.img = p.querySelector('#bl-img')
@@ -351,22 +366,74 @@ window.__ModuleLoader__.load({
           S.vw = d.vw || S.vw
           els.img.src = 'data:image/jpeg;base64,' + d.img
           els.empty.style.display = 'none'
-          els.dot.classList.add('on')
+          S.lastFrameAt = Date.now()
+          S.streamError = false
           S.alive = true
           els.title.textContent = d.title || '浏览器观察窗'
           els.url.textContent = trimUrl(d.url)
           S.pageTitle = d.title || ''
           updateMinTitle()   // 收起态那条把手也要显示当前页面名
+          renderHealth()     // 绿灯只由这一处点亮：画面真的到了才算"实时"
         })
         es.addEventListener('offline', function () {
-          els.dot.classList.remove('on')
           S.alive = false
+          S.streamError = false   // 宿主明确说浏览器关了，不是"断流"
+          renderHealth()
         })
-        es.onerror = function () { /* EventSource 自动重连 */ }
+        // 断了就是断了：EventSource 自己会重连，但**不能**让绿灯继续亮着装作在播
+        //（用户 2026-09-14 反馈：断流后还能把最后一帧当成实时画面）。
+        es.onopen = function () { S.streamError = false; renderHealth() }
+        es.onerror = function () { S.streamError = true; renderHealth() }
       } catch (e) { /* 无 EventSource：只靠 /bl/state 轮询文字信息 */ }
     }
     function closeStream() {
       if (S.es) { try { S.es.close() } catch (e) {} S.es = null }
+    }
+
+    // ------------------------------------------------------------ 画面健康（v0.13.0）
+    // 两个**独立**的事实，别再混成一个绿点（用户 2026-09-14 反馈）：
+    //   ① 浏览器运行中 —— 宿主 /bl/state 的 alive（轮询 2.5s）
+    //   ② 画面在更新   —— SSE 最近一帧的到达时间（阈值按最慢档 1 FPS 留三次余量）
+    // 绿灯 = 两条都成立；黄灯 = 浏览器在跑但画面断了（正在自动重连），
+    // 此时画面上还会盖一条"画面已停 · 最后更新于 X 秒前"，免得把最后一帧当现场。
+    var STALE_MS = 3500
+    function hostAlive() { return !!(S.state && S.state.alive) }
+    /** 纯函数（测试缝 tools/verify-panel-health.mjs）：三个事实 ⇒ 该亮哪种灯。
+     *  hostAlive=浏览器在跑；hasStream=有 SSE 连接；lastFrameAt=最近一帧时刻（0=从没收到）。 */
+    function computeHealth(facts) {
+      var f = facts || {}
+      if (!f.hostAlive) return 'off'
+      var last = Number(f.lastFrameAt) || 0
+      if (!f.hasStream && last === 0) return 'alive'   // 老内核无 EventSource：只能说"在运行"
+      if (last === 0) return 'stale'                   // 有连接但一帧都没来
+      return (Number(f.now) - last) < STALE_MS ? 'live' : 'stale'
+    }
+    function healthState() {
+      return computeHealth({ hostAlive: hostAlive(), hasStream: !!S.es, lastFrameAt: S.lastFrameAt, now: Date.now() })
+    }
+    /** 黄灯旁边写什么：从没收到过帧 vs 中途断了，是两件事。 */
+    function healthText(state, lastFrameAt) {
+      if (state !== 'stale') return ''
+      return Number(lastFrameAt) > 0 ? '正在重连' : '还没收到画面'
+    }
+    function renderHealth() {
+      if (!els.dot || !S.open) return
+      var st = healthState()
+      els.dot.classList.toggle('on', st === 'live')
+      els.dot.classList.toggle('warn', st === 'stale')
+      if (els.status) els.status.textContent = healthText(st, S.lastFrameAt)
+      if (els.stale) {
+        var showStale = st === 'stale' && S.lastFrameAt > 0
+        els.stale.hidden = !showStale
+        if (showStale && els.staleAge) {
+          els.staleAge.textContent = String(Math.max(0, Math.round((Date.now() - S.lastFrameAt) / 1000)))
+        }
+      }
+      updateMinTitle()   // 收起成一条时也要能看出"画面停了"
+    }
+    function startHealthTick() {
+      if (S.health) return
+      S.health = setInterval(renderHealth, 1000)
     }
 
     // ---------------------------------------------------------------- state 轮询
@@ -402,10 +469,10 @@ window.__ModuleLoader__.load({
           els.act.textContent = '🤖 ' + last.label
           els.act.classList.add('show')
         }
-        if (!S.es) { // 无流时给静态信息
-          els.dot.classList.toggle('on', !!st.alive)
+        if (!S.es) { // 无流时给静态信息（有流时健康状态一律由 renderHealth 单点决定）
           if (!st.alive) { els.empty.style.display = 'flex'; els.img.removeAttribute('src') }
         }
+        renderHealth()
       }).catch(function () {})
     }
 
@@ -436,10 +503,13 @@ window.__ModuleLoader__.load({
     function savedMin() { return blLoad(MIN_KEY) === '1' }
     function updateMinTitle() {
       if (!els.title) return
-      if (!S.min) { els.title.textContent = S.pageTitle || '浏览器观察窗'; return }
+      // 收起成一条时只剩这行字，画面停没停必须从这里也看得出来（否则那条把手还像在实时）
+      var stale = S.open && healthState() === 'stale'
+      var mark = stale ? ' · ⏸ 画面已停' + (S.lastFrameAt > 0 ? Math.max(0, Math.round((Date.now() - S.lastFrameAt) / 1000)) + 's' : '') : ''
+      if (!S.min) { els.title.textContent = (S.pageTitle || '浏览器观察窗') + mark; return }
       var t = (S.state && S.state.tabs || []).filter(function (x) { return x.selected })[0]
       var name = S.pageTitle || (t ? trimUrl(t.url || '') : '')
-      els.title.textContent = '浏览器观察窗' + (name ? ' · ' + name : '') + '（点这里展开）'
+      els.title.textContent = '浏览器观察窗' + (name ? ' · ' + name : '') + mark + '（点这里展开）'
     }
     function setMin(on, save) {
       S.min = !!on
@@ -809,12 +879,14 @@ window.__ModuleLoader__.load({
       applyPanelPos()
       openStream()
       if (!S.poll) S.poll = setInterval(pollState, 2500)
+      startHealthTick()   // 1s 心跳：喂"最后更新于 X 秒前"和绿灯/黄灯的翻转
       pollState()
     }
     function hidePanel(byUser) {
       S.open = false
       if (els.panel) els.panel.style.display = 'none'
       closeStream()
+      if (S.health) { clearInterval(S.health); S.health = null }
       if (byUser) {
         S.hideUntil = Date.now() + 60000
         S.userClosed = true   // 用户主动收走：本页面内不再自动弹，除非再点 🌐
@@ -1128,6 +1200,13 @@ window.__ModuleLoader__.load({
     }
 
     exports.inject = ['slots']
+    // 测试缝（浏览器端不读）：画面健康判定是"状态反馈可信"的核心，单独可断言，
+    // 免得以后有人把绿灯又接回 S.alive 那种"连上了就算在播"的旧口径。
+    exports.__blInternals = {
+      computeHealth: computeHealth,
+      healthText: healthText,
+      STALE_MS: STALE_MS,
+    }
     return module.exports
   },
 })

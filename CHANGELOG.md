@@ -1,5 +1,33 @@
 # 变更记录
 
+## 0.13.0 — 2026-09-14 · 画面健康：绿灯只代表"画面在更新"，断流亮黄灯
+
+**问题**（用户 2026-09-14 反馈，逐条按源码核实）：内嵌观察窗收到画面就
+`els.dot.classList.add('on')` 亮绿灯，而**断流时状态不更新** —— `es.onerror` 是
+`function () { /* EventSource 自动重连 */ }`（纯注释、不动状态），`offline` 事件之外的
+任何断流（宿主重启、网络断、SSE 被掐）都不会灭灯；而 `pollState` 里的轮询只在
+`if (!S.es)` 分支才校灯，**流对象还在时永远不会纠正这个绿点**。结果是用户把最后一帧
+当成实时画面 —— 面板看着"正在播"，实际早停了。
+
+**改法**：把两个事实分开（这正是原来混淆的地方）——
+① **浏览器运行中** = 宿主 `/bl/state` 的 `alive`（轮询 2.5s）；
+② **画面在更新** = SSE 最近一帧到达时刻 `S.lastFrameAt`（阈值 `STALE_MS = 3500ms`，
+按最慢档 1 FPS 留三次余量）。
+判定抽成纯函数 `computeHealth({hostAlive, hasStream, lastFrameAt, now})` ⇒
+`off`（灰：浏览器没跑）/ `alive`（无 EventSource 只能报"在运行"，不谎报断流）/
+`live`（绿）/ `stale`（黄：有连接但超时没帧）。
+- 绿灯**只由帧处理器点亮**（`S.lastFrameAt = Date.now()` → `renderHealth()`），其余一律走 `renderHealth` 单点决定；
+- `es.onerror` 置 `S.streamError = true` 并立即重渲染；`es.onopen` 清标记；
+- 黄灯时顶部写「正在重连」（从没收到过帧则写「还没收到画面」），画面中上盖一条
+  「⏸ 画面已停 · 最后更新于 X 秒前」角标，收起成一条时标题行也带「· ⏸ 画面已停 Ns」；
+- 1s 心跳（`startHealthTick`，面板收起即清）负责翻转与秒数增长。
+
+**验证**：新增 `tools/verify-panel-health.mjs`（**21 项**，注册进 `run-all.mjs` SUITES）——
+纯函数八种组合（含阈值边界、缺参数不抛错）、两种黄灯文案、以及 9 条接线断言
+（帧才刷新 `lastFrameAt`、`onerror` 必须重渲染、面板 HTML/CSS 两处提示还在、
+**没有退回** `classList.toggle('on', !!st.alive)` 那种"宿主说活着就亮绿"的旧口径）。
+`npm test`：语法门禁 8/8 + 离线套件 **13/13**（README 的"13 套"由 verify-manifest 当场比对）。
+
 ## 未发布 — 文档数字不再陈旧（口径：不许写跑出来的数）；CI 装测试依赖 + 恢复 6 套测试；修 `loadWs()` 的导出形状缺陷；verify-manifest 改口径
 
 ### ① 产品缺陷：`loadWs()` 的导出形状只对了一半（"本机全绿、CI 全红"的根因）

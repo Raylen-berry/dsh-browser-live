@@ -48,7 +48,7 @@ npm run audit:check            # 只校验留痕哈希链（= node tools/verify-
 **出网边界**：只有 `npm ci` / `npm install` 那一步出网（按 `package-lock.json` 装 devDependencies）。
 `npm test` 本身**不出网** —— 不做真实下载、不调真实模型、不起真浏览器、不读本机 DSH 安装目录。
 
-`tools/run-all.mjs` 把 8 项语法门禁（`node --check`）和 12 套离线测试都跑完再汇总（原来的 `npm test` 是 `&&` 串，
+`tools/run-all.mjs` 把 8 项语法门禁（`node --check`）和 13 套离线测试都跑完再汇总（原来的 `npm test` 是 `&&` 串，
 第一套一失败后面的就不跑了），任一套非 0 退出 ⇒ `npm test` 退出码 1 ⇒ CI 变红。
 CI 用 Node **22 / 24** 两档矩阵、windows-latest。
 
@@ -84,7 +84,7 @@ CI 用 Node **22 / 24** 两档矩阵、windows-latest。
 | `tools/verify-result-cap.mjs` | 通过 | 通过 |
 | `tools/verify-launch.mjs` | 通过 | 通过 |
 
-合计：8 项语法门禁 + 12 套离线测试全部通过，两档均 `npm test` 退出码 0；逐套件的通过条数以 `npm test` 输出为准。
+合计：8 项语法门禁 + 13 套离线测试全部通过，两档均 `npm test` 退出码 0；逐套件的通过条数以 `npm test` 输出为准。
 
 **未纳入 CI** 的套件（原因同时写在 `tools/run-all.mjs` 的 `EXCLUDED` 里）：
 
@@ -595,6 +595,15 @@ host(index.js) ──WS──> 扩展（extension/, MV3，Chrome 和 Edge 各装
 
 ## 版本与变更记录
 
+- **v0.13.0**：**画面健康 —— 绿灯只代表"画面在更新"，断流亮黄灯**（用户 2026-09-14 反馈）。
+  原先收到画面就亮绿灯，而断流时**状态不更新**：`es.onerror` 是纯注释、`pollState` 的校灯只在
+  `if (!S.es)` 分支里跑 ⇒ 流对象还在时那个绿点永远不会被纠正，用户会把最后一帧当成实时画面。
+  现在把"浏览器在运行"（宿主 `/bl/state.alive`）与"画面在更新"（SSE 最近一帧时刻，阈值 3.5s）
+  分成两个事实：判定是纯函数 `computeHealth()`，绿灯**只由帧处理器点亮**，
+  黄灯时顶部写「正在重连」（从没收到过帧则写「还没收到画面」）、画面中上盖
+  「⏸ 画面已停 · 最后更新于 X 秒前」角标、收起态标题行也带「· ⏸ 画面已停 Ns」。
+  回归：新增 `tools/verify-panel-health.mjs`（**21 项**：纯函数八种组合 + 两种文案 + 9 条接线断言，
+  含"没有退回 `classList.toggle('on', !!st.alive)` 旧口径"），离线套件 12 ⇒ **13 套**。
 - **v0.12.0**：**把"尺度"从写死的像素改成百分比，并清掉剩下的写死项** ——
   ①**观察窗面板**：宽/高/宽屏宽改成视口百分比（`panelWidthPct` 等，设置页可调、即时生效）。
   旧写法 `clamp(300px→560px)` 看着像百分比，但**上限 560px 是硬上限** —— 窗口再宽也不变大，

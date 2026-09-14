@@ -32,6 +32,9 @@ const SUITES = [
   'tools/verify-extension-v2.mjs',
   'tools/verify-launcher.mjs',
   'tools/verify-manifest.mjs',
+  // 观察窗"画面健康"判定（纯函数 + 接线断言）：用户 2026-09-14 反馈"断流还在亮绿灯"。
+  // 不起浏览器、不出网，只把 client.js 的 factory 拉起来取测试缝。
+  'tools/verify-panel-health.mjs',
   // 以下 6 套要测试用的 npm 'ws' 包（已在 package.json 的 devDependencies 里声明，
   // CI 由 `npm ci` 装出、本机由 `npm install` 装出）—— 2026-09 从 EXCLUDED 挪回。
   // 它们在**干净环境**（DSH_HOME/APPDATA/LOCALAPPDATA/USERPROFILE 指空目录）实测通过。
