@@ -115,32 +115,44 @@ Node 20 **没有全局 `WebSocket`**（实测 `node20 globalThis.WebSocket = und
 其中 `verify-host` / `verify-page-fns` / `verify-web-tools` 三套**根本不在 CI 门禁里**（要起真浏览器），
 所以文档里的数连"跑一遍看对不对"这一步都没人做过 —— 于是反复陈旧。
 
-**取数方式**（重要）：门禁内的套件跑 `npm test`（= `node tools/run-all.mjs`）取真数；
+**取数方式**（重要）：门禁内的套件跑 `npm test`（= `node tools/run-all.mjs`）取**运行通过数**；
 **门禁外的三套不许为了取数字去跑**（会拉真 Chromium / 要真实环境），改用**代码里的断言计数**
-（`tools/verify-*.mjs` 里 `^\s*ok\(` 的行数）。所以下表门禁外的"实测"一列是**静态断言数**，
-不是运行结果 —— 它可能偏高（断言写在分支/循环里时，运行期不一定每条都跑到），
-这也是本轮定"以后干脆不写这类数"的直接理由。
+（`tools/verify-*.mjs` 里 `^\s*ok\(` 的行数）。静态计数与运行通过数是两个量，实测对照如下
+（这也是本轮定"以后干脆不写这类数"的直接理由 —— 两者既可能相等也可能不等）：
+
+| 套件 | 代码里 `ok(` 行数 | 运行时 passed | 关系 |
+| --- | --- | --- | --- |
+| `verify-manifest` | 48 | 54 | 断言写在多行/循环里，运行数 > 静态数 |
+| `verify-extension-v2` | 58 | 160 | 同上（表驱动，一行产出多条） |
+| `verify-launcher` | 10 | 15 | 同上 |
+| `verify-result-cap` | 61 | 67 | 同上 |
+| `verify-audit` | 17 | 未在本轮单独跑（不在门禁；`npm test` 里只报摘要行） | 静态 17 ≥ README 写的 15 |
+| `verify-audit-redact` | 56 | 56 | 相等 |
+| `verify-bridge` / `-v2` / `extension` / `browsers` / `launch` | 23 / 74 / 65 / 35 / 24 | 23 / 74 / 77 / 35 / 24 | 多数相等，`verify-extension` 少 12 |
+| `verify-host`（门禁外） | 94 | 不跑（会起真浏览器） | 只能给静态上界 |
+| `verify-page-fns`（门禁外） | 121 | 不跑（同上） | 与 README 写的 96 差 25 |
+| `verify-web-tools`（门禁外） | 45 | 不跑（同上） | README 未写它的数 |
 
 **对照表（文档写的 vs 实测）**
 
-| 位置 | 文档写 | 实测 | 处理 |
+| 位置 | 文档写 | 实测/静态 | 处理 |
 | --- | --- | --- | --- |
-| README「发布前检查」 | `verify-audit` 期望 15 | 17（跑） | 改写为不写条数 |
-| README「发布前检查」 | `verify-host` 期望 73 | 94（静态断言数；不在门禁） | 改写为不写条数 |
-| README「数据与隐私」 | `verify-audit-redact` 期望 56 | 56（跑，56 是"项"数） | 改写为不写条数 |
-| README「网页理解与搜索」 | `verify-page-fns` 96 条断言 | 121（静态；不在门禁） | 改写为不写条数 |
-| README「网页理解与搜索」 | `verify-host` 12 条 | 94（静态；不在门禁） | 改写为不写条数 |
-| README「单次结果上限」 | `verify-result-cap` 67 项 | 67（跑） | 改写为不写条数 |
+| README「发布前检查」 | `verify-audit` 期望 15 | 静态 17（README 写的是下限，也不对） | 改写为不写条数 |
+| README「发布前检查」 | `verify-host` 期望 73 | 静态 94（门禁外，静态只是上界） | 改写为不写条数 |
+| README「数据与隐私」 | `verify-audit-redact` 期望 56 | 静态 56 = 运行 56 | 改写为不写条数 |
+| README「网页理解与搜索」 | `verify-page-fns` 96 条断言 | 静态 121（门禁外） | 改写为不写条数 |
+| README「网页理解与搜索」 | `verify-host` 12 条 | 静态 94（门禁外） | 改写为不写条数 |
+| README「单次结果上限」 | `verify-result-cap` 67 项 | 运行 67 | 改写为不写条数 |
+| README「发布前检查」表格 | 10 套各写「N 项通过」 | 与运行数逐个不符 | 只留「通过」 |
 | README「组成/工具一览」 | 21 个 `browser_*` 工具 | 21（静态，`index.js` 注册项） | 保留并加相等断言 |
 | README「网页理解与搜索」 | SKILL.md **19 节** | **14**（`## N.` 编号标题数） | 改成 14 并加相等断言 |
 | README「接管你自己的浏览器」 | v0.12.1 前 6 套因缺 `ws` 被排除 | 6 套（`git log`，当前 `EXCLUDED` 是 3 套） | 是历史，保留 |
-| docs/MULTI-BROWSER.md | `verify-extension-v2`(146)、6 套件、403 项全绿 | 160 / 12 套 / — | 删数字，指向 `npm test` |
-| docs/PLAN-user-browser-takeover.md | `verify-extension`(66)、`verify-host`(59)、6 套 | 77 / 94 / — | 删数字，指向 `npm test` |
-| extension/README.md | `verify-extension`(66)、`verify-extension-v2`(146) | 77 / 160 | 删数字，指向 `npm test` |
+| docs/MULTI-BROWSER.md | `verify-extension-v2`(146)、6 套件、403 项全绿 | 运行 160 / 12 套 | 删数字，指向 `npm test` |
+| docs/PLAN-user-browser-takeover.md | `verify-extension`(66)、`verify-host`(59)、6 套 | 运行 77 / 静态 94 | 删数字，指向 `npm test` |
+| extension/README.md | `verify-extension`(66)、`verify-extension-v2`(146) | 运行 77 / 160 | 删数字，指向 `npm test` |
 
-> 说明：门禁内的 12 套里，多数"静态 `ok(` 行数"与运行通过数恰好相等（23/74/77/35/67/24/15/56/17），
-> 所以能跑的那几套直接看 `npm test` 输出的真数最稳。`verify-manifest` 自己的条数**不写进文档** ——
-> 它是"文档数字的守门人"，把自己写进被校验的文档会变成自引用（改一条断言就要改文档）。
+> 说明：`verify-manifest` 自己的条数**不写进文档** —— 它是"文档数字的守门人"，
+> 把自己写进被校验的文档会变成自引用（改一条断言就要改文档）。
 
 **口径（本轮定，二选一里选了这个）**：**现状文档一律不写"某套件通过多少条"，只留不跑就能静态核对的清单数字；
 逐套件条数以 `npm test` 输出为准。**
