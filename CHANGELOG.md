@@ -1,6 +1,6 @@
 # 变更记录
 
-## 未发布 — CI 装测试依赖 + 恢复 6 套测试；修 `loadWs()` 的导出形状缺陷；verify-manifest 改口径
+## 未发布 — 文档数字不再陈旧（口径：不许写跑出来的数）；CI 装测试依赖 + 恢复 6 套测试；修 `loadWs()` 的导出形状缺陷；verify-manifest 改口径
 
 ### ① 产品缺陷：`loadWs()` 的导出形状只对了一半（"本机全绿、CI 全红"的根因）
 
@@ -108,6 +108,79 @@ Node 20 **没有全局 `WebSocket`**（实测 `node20 globalThis.WebSocket = und
 | `tools/verify-host.mjs` | 会**真的拉起浏览器**：`browser_open{gui:true}` 在有 Chromium 的机器上断言"启动成功"（真窗口 + 真 CDP），CI runner 自带 Edge |
 | `tools/verify-page-fns.mjs` | 会拉无头 Chromium（Edge/Chrome）做 CDP 实测 |
 | `tools/verify-web-tools.mjs` | 同上，会拉真 Chromium 做 CDP 实测 |
+
+### ⑤ 文档里的「套件数字」清陈旧 + 加一道防陈旧的机制（本轮）
+
+**为什么会有这一轮**：README 与 docs 里散着一堆"某套件通过多少条"，而它们**只能跑出来**才对得上；
+其中 `verify-host` / `verify-page-fns` / `verify-web-tools` 三套**根本不在 CI 门禁里**（要起真浏览器），
+所以文档里的数连"跑一遍看对不对"这一步都没人做过 —— 于是反复陈旧。
+
+**取数方式**（重要）：门禁内的套件跑 `npm test`（= `node tools/run-all.mjs`）取真数；
+**门禁外的三套不许为了取数字去跑**（会拉真 Chromium / 要真实环境），改用**代码里的断言计数**
+（`tools/verify-*.mjs` 里 `^\s*ok\(` 的行数）。所以下表门禁外的"实测"一列是**静态断言数**，
+不是运行结果 —— 它可能偏高（断言写在分支/循环里时，运行期不一定每条都跑到），
+这也是本轮定"以后干脆不写这类数"的直接理由。
+
+**对照表（文档写的 vs 实测）**
+
+| 位置 | 文档写 | 实测 | 处理 |
+| --- | --- | --- | --- |
+| README「发布前检查」 | `verify-audit` 期望 15 | 17（跑） | 改写为不写条数 |
+| README「发布前检查」 | `verify-host` 期望 73 | 94（静态断言数；不在门禁） | 改写为不写条数 |
+| README「数据与隐私」 | `verify-audit-redact` 期望 56 | 56（跑，56 是"项"数） | 改写为不写条数 |
+| README「网页理解与搜索」 | `verify-page-fns` 96 条断言 | 121（静态；不在门禁） | 改写为不写条数 |
+| README「网页理解与搜索」 | `verify-host` 12 条 | 94（静态；不在门禁） | 改写为不写条数 |
+| README「单次结果上限」 | `verify-result-cap` 67 项 | 67（跑） | 改写为不写条数 |
+| README「组成/工具一览」 | 21 个 `browser_*` 工具 | 21（静态，`index.js` 注册项） | 保留并加相等断言 |
+| README「网页理解与搜索」 | SKILL.md **19 节** | **14**（`## N.` 编号标题数） | 改成 14 并加相等断言 |
+| README「接管你自己的浏览器」 | v0.12.1 前 6 套因缺 `ws` 被排除 | 6 套（`git log`，当前 `EXCLUDED` 是 3 套） | 是历史，保留 |
+| docs/MULTI-BROWSER.md | `verify-extension-v2`(146)、6 套件、403 项全绿 | 160 / 12 套 / — | 删数字，指向 `npm test` |
+| docs/PLAN-user-browser-takeover.md | `verify-extension`(66)、`verify-host`(59)、6 套 | 77 / 94 / — | 删数字，指向 `npm test` |
+| extension/README.md | `verify-extension`(66)、`verify-extension-v2`(146) | 77 / 160 | 删数字，指向 `npm test` |
+
+> 说明：门禁内的 12 套里，多数"静态 `ok(` 行数"与运行通过数恰好相等（23/74/77/35/67/24/15/56/17），
+> 所以能跑的那几套直接看 `npm test` 输出的真数最稳。`verify-manifest` 自己的条数**不写进文档** ——
+> 它是"文档数字的守门人"，把自己写进被校验的文档会变成自引用（改一条断言就要改文档）。
+
+**口径（本轮定，二选一里选了这个）**：**现状文档一律不写"某套件通过多少条"，只留不跑就能静态核对的清单数字；
+逐套件条数以 `npm test` 输出为准。**
+不选"把文档数字改成实测值再靠断言维持相等"的理由：那要求断言自己拿到每个套件的运行结果，
+而最容易陈旧的 `verify-host` / `verify-page-fns` / `verify-web-tools` **在 CI 里拿不到**（要起真浏览器），
+"相等"这条口径对它们天然失效 —— 只能改成"禁写"，才是有牙的收口。
+
+**落地**：`tools/verify-manifest.mjs` 新增 **D 段**（职责就是"登记与文档一致性"）：
+
+1. **禁写**：现状文档（README 的「版本与变更记录」之前 + `docs/*.md` 全文）里，
+   "套件名 + 通过数"（含中文"项/条"、`passed/failed`、表格里的 `套件名(74)` 写法）与 `M/N` 结果分数一律判红。
+   豁免范围是显式的：README 的「版本与变更记录」之后、`CHANGELOG.md`、`extension/README.md`、
+   `skills/**/SKILL.md`、`.github/workflows/*.yml` 注释
+   （它们写的是"当时测出来是多少"，改它等于伪造历史）。
+   逃生口只有一个且无后门：写"输出长什么样"时可以带 `<!-- doc-numbers-ok -->` 标记，
+   **且该行数字必须全是 0**（`0 failed` 放行，`93 passed` 照样抓 —— 有专门的自检钉这条）。
+2. **相等校验**（能静态推出来的清单事实，出现就必须与代码相等）：
+   语法门禁条数 ←→ `run-all.mjs` 的 `CHECKS`；离线套件数 ←→ `SUITES`；未纳入 CI 套件数 ←→ `EXCLUDED`；
+   `browser_*` 工具数 ←→ `index.js` 注册项；**SKILL.md 节数 ←→ 它的 `## N.` 编号标题数**；
+   SKILL.md 剧本数 ←→ 它的 `**A.` 标号数。另加"节号/标号必须从 0、从 A 连续排下来"（编号乱了就没人能核对）。
+3. **自检**：把正/负样本直接喂给判定函数（12 条断言：6 条正样本、3 条负样本、3 条标记相关），
+   规则被改松当场红 —— 含"标记不是后门"那条（打标记 + 非零通过数照样判红）。
+
+**反向验证**（故意改错，逐条实测，每条都应红）：
+
+| 故意改错 | 结果 |
+| --- | --- |
+| README `8 项语法门禁` → `9 项` | ✗ exit=1：`{"doc":[9],"actual":8}`（53 passed / 1 failed） |
+| README `21 个 browser_* 工具` → `22 个` | ✗ exit=1：`{"doc":[22,21],"actual":21}`（53/1） |
+| README `SKILL.md（14 节` → `19 节` | ✗ exit=1：`{"doc":[19],"actual":14}`（53/1） |
+| README 加回 `verify-host 期望 93 passed / 0 failed`（带标记也带非零数） | ✗ exit=1：被"禁写通过数"抓到（53/1） |
+| README `12 套离线测试` → `13 套` | ✗ exit=1：`{"doc":[13,12],"actual":12}`（53/1） |
+| README `4 个现成剧本` → `5 个` | ✗ exit=1：`{"doc":[5],"actual":4}`（53/1） |
+
+改回后：`✓ verify-manifest: 54 passed, 0 failed`，`npm test` 退出码 0（8/8 语法门禁 + 12/12 套件）。
+
+**未覆盖**：`extension/README.md`、`skills/**/SKILL.md`、`.github/workflows/*.yml` 与「版本与变更记录」
+之后的内容若再写"套件名 + 数字"，D 段**管不到** —— 这是上面那张豁免清单的代价；
+扫描范围只有 README 的现状章节 + `docs/*.md` 全文。收窄或放宽都要先想清楚：
+放宽会把"设计文档里的历史叙述"一起禁掉，收窄则等于留下同样的陈旧口子。
 
 ## 0.12.1 — 长结果被截坏：超限改成"序列化前裁剪"，声明上限与实测对齐（20k 正文 / 24k 整体）
 

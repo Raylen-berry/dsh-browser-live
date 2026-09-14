@@ -9,8 +9,9 @@
 >   协议与实现实况见 [`MULTI-BROWSER.md`](./MULTI-BROWSER.md)（本文件保留原始设计与"为什么这么做"）。
 > - **仍未做**：下载接管（`chrome.downloads`，用户浏览器档的 `browser_downloads` 仍只列插件目录）、
 >   `evaluate` 收窄（换成固定脚本下发）、与 `dsh-approval-gate` 的联动。
-> - 离线验证：`tools/verify-bridge.mjs`(23) + `verify-bridge-v2.mjs`(74) + `verify-extension.mjs`(66) +
->   `verify-extension-v2.mjs`(146) + `verify-host.mjs`(59) + `verify-browsers.mjs`(35，两个 Worker 扮演两台浏览器)。
+> - 离线验证：`tools/verify-bridge.mjs` + `verify-bridge-v2.mjs` + `verify-extension.mjs` +
+>   `verify-extension-v2.mjs` + `verify-browsers.mjs`（两个 Worker 扮演两台浏览器）；
+>   `verify-host.mjs` 另跑（会真起浏览器，不在 `npm test` 门禁里）。逐套件条数以 `npm test` 输出为准。
 > - 设置页开关已存在（设置 → 浏览器观察窗 → 用户浏览器），不再是"放一个不工作的开关"。
 
 ## 0. 为什么要这条路线

@@ -89,7 +89,7 @@ host → 扩展新增消息：
 | 桥（多扩展槽 + 路由 + `cdpFor`） | `bridge.js` | ✅ |
 | host（每浏览器会话 + `use:"chrome"\|"edge"`） | `index.js` | ✅ v0.7.0 |
 | 观察窗/设置页显示已连接浏览器 | `client.js`, `/bl/state`, `/bl/bridge` | ✅ |
-| 离线验证 | `verify-bridge-v2`(74) · `verify-extension-v2`(146) · `verify-browsers`(35) 等 6 套件 | ✅ 403 项全绿 |
+| 离线验证 | `node tools/verify-bridge-v2.mjs` · `verify-extension-v2.mjs` · `verify-browsers.mjs` 等（清单见 `node tools/run-all.mjs --list`） | ✅ 全绿，条数以 `npm test` 输出为准 |
 | Edge 真机验证 | 装扩展 + 读一个已登录页 + 真点击 | ⏳ 待做（见下） |
 
 ### Edge 侧装机步骤（一次性）

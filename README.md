@@ -10,7 +10,7 @@ v0.5.0 起还可选**接管你自己的日常浏览器**（装一个 MV3 扩展�
 ## 它解决什么
 
 DSH 内置的 web_search/web_fetch 只能"读"；凡是**必须真浏览器**的活（登录态、动态渲染、表单、验证码、
-需真人会话的站点）就干不了。装上本插件后，agent 获得 18 个 `browser_*` 工具，能真正在页面里
+需真人会话的站点）就干不了。装上本插件后，agent 获得 21 个 `browser_*` 工具，能真正在页面里
 点击、输入、提交、滚动、取快照；你在观察窗里实时看到每一步，卡在验证码时点进面板亲手代打，
 完事再把鼠标还给 agent。
 
@@ -18,7 +18,7 @@ DSH 内置的 web_search/web_fetch 只能"读"；凡是**必须真浏览器**的
 
 | 文件 | 职责 |
 |---|---|
-| `index.js` | Host（ESM）：拉起/接管 Chrome → CDP；注册 18 个 `browser_*` 工具；`/bl/*` 观察窗后端（SSE 帧流 + 输入回传 + 设置/代理 + 下载取回 + `/bl/view` 独立网页 + `/bl/bridge` 桥状态） |
+| `index.js` | Host（ESM）：拉起/接管 Chrome → CDP；注册 21 个 `browser_*` 工具；`/bl/*` 观察窗后端（SSE 帧流 + 输入回传 + 设置/代理 + 下载取回 + `/bl/view` 独立网页 + `/bl/bridge` 桥状态） |
 | `bridge.js` | 用户浏览器桥（P0）：127.0.0.1 WS 服务端 + token 握手 + 与 `Cdp` 同形的 `send/on/alive/close` |
 | `extension/` | Chrome MV3 扩展（P0）：service worker 当"反向 CDP 客户端"（`chrome.debugger`），弹窗逐站点授权；见 `extension/README.md` |
 | `client.js` | Client 单文件：侧栏 🌐 按钮（无 slots 环境退化为自建浮球；与 bg-atelier 宝珠叠列共存）+ 观察窗（实时帧、标签条、agent 动作条、鼠标键盘接管、FPS/画质、下载取回；内嵌面板可拖动贴边，或切成独立网页） |
@@ -48,15 +48,23 @@ npm run audit:check            # 只校验留痕哈希链（= node tools/verify-
 **出网边界**：只有 `npm ci` / `npm install` 那一步出网（按 `package-lock.json` 装 devDependencies）。
 `npm test` 本身**不出网** —— 不做真实下载、不调真实模型、不起真浏览器、不读本机 DSH 安装目录。
 
-`tools/run-all.mjs` 把 8 项语法门禁（`node --check`）和每套测试都跑完再汇总（原来的 `npm test` 是 `&&` 串，
+`tools/run-all.mjs` 把 8 项语法门禁（`node --check`）和 12 套离线测试都跑完再汇总（原来的 `npm test` 是 `&&` 串，
 第一套一失败后面的就不跑了），任一套非 0 退出 ⇒ `npm test` 退出码 1 ⇒ CI 变红。
 CI 用 Node **22 / 24** 两档矩阵、windows-latest。
+
+> **文档口径（本轮定）：这里不写"某套件通过多少条"。** 逐套件的通过数只能跑出来 —— 而其中
+> `verify-host` / `verify-page-fns` / `verify-web-tools` 三套**根本不在 CI 门禁里**（要起真浏览器），
+> 把它们写进文档就没人能核对，已经陈旧过不止一次（具体是哪些数、涨到多少，见 CHANGELOG）。
+> 现在只留**不跑就能静态核对**的清单数字（门禁几条、离线几套、工具几个、技能正文几节，
+> 都由 `tools/verify-manifest.mjs` 的 D 段当场比对，写错就红）；
+> **逐套件条数一律以 `npm test` 的输出为准**（要清单用 `node tools/run-all.mjs --list`）。
 
 > **为什么没有 Node 20**（本轮实测纠正）：扩展代码 `extension/background.js` 里的裸
 > `new WebSocket(...)`、以及"没有 ws 包就退回 `globalThis.WebSocket`"那条路，都依赖**全局 WebSocket**，
 > 而 Node 20 没有这个全局对象（实测 `node20 globalThis.WebSocket = undefined`，`node22/24 = function`）。
 > 于是 `verify-extension` / `verify-browsers` / `verify-result-cap` 三套在 Node 20 上必红
-> （干净环境实测：8/8 语法门禁过、套件 9/12，其中 `verify-result-cap` 49 passed / 18 failed）。
+> （干净环境实测：语法门禁全过、离线套件只有一部分通过，`verify-result-cap` 因缺 WebSocket 大面积失败；
+> 那次的具体条数见 CHANGELOG）。
 > 所以矩阵写 22/24，并在 `package.json` 里声明 `engines.node >= 22` —— 把真实下限写进 manifest，而不是把红藏起来。
 
 干净环境实测（`DSH_HOME` / `APPDATA` / `LOCALAPPDATA` / `USERPROFILE` 全指空目录，独立下载的 node）：
@@ -65,18 +73,18 @@ CI 用 Node **22 / 24** 两档矩阵、windows-latest。
 | --- | --- | --- |
 | `tools/verify-audit.mjs` | 通过 | 通过 |
 | `tools/verify-audit-chain.mjs` | 通过 | 通过 |
-| `tools/verify-audit-redact.mjs` | 56 项通过 | 56 项通过 |
-| `tools/verify-extension-v2.mjs` | 160 项通过 | 160 项通过 |
-| `tools/verify-launcher.mjs` | 15 项通过 | 15 项通过 |
-| `tools/verify-manifest.mjs` | 26 项通过 | 26 项通过 |
-| `tools/verify-bridge.mjs` | 23 项通过 | 23 项通过 |
-| `tools/verify-bridge-v2.mjs` | 74 项通过 | 74 项通过 |
-| `tools/verify-extension.mjs` | 77 项通过 | 77 项通过 |
-| `tools/verify-browsers.mjs` | 35 项通过 | 35 项通过 |
-| `tools/verify-result-cap.mjs` | 67 项通过 | 67 项通过 |
-| `tools/verify-launch.mjs` | 24 项通过 | 24 项通过 |
+| `tools/verify-audit-redact.mjs` | 通过 | 通过 |
+| `tools/verify-extension-v2.mjs` | 通过 | 通过 |
+| `tools/verify-launcher.mjs` | 通过 | 通过 |
+| `tools/verify-manifest.mjs` | 通过 | 通过 |
+| `tools/verify-bridge.mjs` | 通过 | 通过 |
+| `tools/verify-bridge-v2.mjs` | 通过 | 通过 |
+| `tools/verify-extension.mjs` | 通过 | 通过 |
+| `tools/verify-browsers.mjs` | 通过 | 通过 |
+| `tools/verify-result-cap.mjs` | 通过 | 通过 |
+| `tools/verify-launch.mjs` | 通过 | 通过 |
 
-合计 **8/8 语法门禁 + 12/12 套件**，两档均 `npm test` 退出码 0。
+合计：8 项语法门禁 + 12 套离线测试全部通过，两档均 `npm test` 退出码 0；逐套件的通过条数以 `npm test` 输出为准。
 
 **未纳入 CI** 的套件（原因同时写在 `tools/run-all.mjs` 的 `EXCLUDED` 里）：
 
@@ -136,7 +144,7 @@ CI 用 Node **22 / 24** 两档矩阵、windows-latest。
   启动前与启动失败时都会自动清理这类残留，并记一条 `🧹 …` 动作提示（不静默）。
 - 留痕（v0.9.0 起）：所有 `browser_*` 调用与页面自身跳转都追加到
   `$DSH_HOME/dsh-browser-live/audit/YYYY-MM-DD.jsonl`（append-only + 哈希链）。
-  `node tools/verify-audit-chain.mjs` 验链；`node tools/verify-audit.mjs` 离线自检 15 项。
+  `node tools/verify-audit-chain.mjs` 验链；`node tools/verify-audit.mjs` 离线自检（不碰真实留痕目录）。
 - **已知宿主坑（三个插件共有）**：部分 DSH Desktop 版本启动时的 `installGeneration` 迁移会把
   `link:` 挂载的插件重新 stage，并把**绝对路径当相对路径拼接** ⇒ `ENOENT`、迁移 defer、
   插件可能不加载。本机靠应用 bundle 的本地补丁（`KEEP_IN_SHARED_TREE`）绕过，**该补丁不在本仓库**；
@@ -156,9 +164,9 @@ node tools/settings.mjs import D:\bl-settings.json --yes   # 新机器（覆盖�
 **换机后自查**
 
 ```powershell
-node tools/verify-audit.mjs         # 期望 PASS 15 项
-node tools/verify-result-cap.mjs    # 期望 67 passed / 0 failed（离线，不起真浏览器）
-node tools/verify-host.mjs          # 期望 73 passed / 0 failed（v0.10.0 起按"有/无真 Chromium"分两支断言）
+node tools/verify-audit.mjs         # 期望 PASS（离线自检；条数以 npm test 输出为准）
+node tools/verify-result-cap.mjs    # 期望 0 failed（离线，不起真浏览器）<!-- doc-numbers-ok -->
+node tools/verify-host.mjs          # 期望 0 failed（v0.10.0 起按"有/无真 Chromium"分两支断言；不在 npm test 门禁里）<!-- doc-numbers-ok -->
 node tools/verify-audit-chain.mjs   # 期望 0 = 链完整（还没留痕时会跳过并返回 0）
 npm test                            # 全套；其中 verify-page-fns / verify-web-tools 会真起一个无头浏览器
 ```
@@ -277,7 +285,7 @@ npm test                            # 全套；其中 verify-page-fns / verify-w
 - **短结果一个字都没变**：没超限就原样返回、不加任何记账字段（`tools/verify-result-cap.mjs` 里
   有"防修过头"断言钉住这两条）。
 
-**验证**：`node tools/verify-result-cap.mjs`（**67 项，离线、不起真浏览器**）—— 真 `apply()` + 真桥 +
+**验证**：`node tools/verify-result-cap.mjs`（**离线、不起真浏览器**）—— 真 `apply()` + 真桥 +
 真扩展 + 一个 Worker 假浏览器（长页模式把工具**真正生成的表达式**放进 `node:vm` 真跑）：
 解析/限额/记账/续读链/短结果/声明一致，以及 `browser_scrape`、`browser_search`、`browser_snapshot`
 这三处同类组合（它们没声明 40000，但同样会撑过 24000，走的是同一道收口）。`npm test` 已包含它。
@@ -320,7 +328,7 @@ browser_search({ query: '关键词', engineSpec: {
 **为什么不做成"自带行动循环的 agent"**：循环是 DSH agent 自己的事。这里只把"看得懂"和"抓得到"补上，
 再用一份**调用方案**告诉 agent 怎么组合。所以：
 
-- `skills/browser-automation/SKILL.md` = 完整调用方案（19 节：决策表 → 浏览器档位 → 观察/行动循环 →
+- `skills/browser-automation/SKILL.md` = 完整调用方案（14 节：决策表 → 浏览器档位 → 观察/行动循环 →
   ref 与状态标记 → **故障处置表** → 读/抓/搜的用法 → 人机验证纪律 → 反模式清单 → 4 个现成剧本 → 验收口径）。
 - DSH 的技能发现**不会**自动扫插件包里的 `skills/`，所以 `index.js` 自己调 `skills.register` 注册
   （`POST /bl/skills/reload` 可免重启重扫新增技能）。技能真正常驻的只有 name + description，
@@ -328,8 +336,9 @@ browser_search({ query: '关键词', engineSpec: {
 - 人机验证、被遮挡、ref 失效这些"卡住"的情形，都做成**工具返回值里的一等公民**
   （`challenge` / `flags.covered-by` / 确定性错误原因），而不是让 agent 自己猜。
 
-验证：`node tools/verify-page-fns.mjs`（**真起无头 Chromium**，本地 fixture 页面，96 条断言）；
-技能注册与重扫路由的断言在 `node tools/verify-host.mjs` 里（12 条）。`npm test` 全绿。
+验证：`node tools/verify-page-fns.mjs`（**真起无头 Chromium**，本地 fixture 页面；它**不在 `npm test`
+门禁里**，自带被起的浏览器）；技能注册与重扫路由的断言在 `node tools/verify-host.mjs` 里。两套的条数
+都以各自命令的输出为准（要清单见 `node tools/run-all.mjs --list`）。
 
 ## 拟人轨迹（v0.3.0）
 
@@ -414,7 +423,7 @@ v0.9.0 起，**每一次 `browser_*` 工具调用**（含 `browser_open` / `brow
 和"普通输入必须还能看到原文"两条），跑法：
 
 ```powershell
-node tools/verify-audit-redact.mjs   # 期望 PASS 56 项
+node tools/verify-audit-redact.mjs   # 期望 0 failed（条数以该命令输出为准）<!-- doc-numbers-ok -->
 ```
 
 收口点只有一个：所有工具都在 `index.js` 的注册循环里被 `withAudit()` 包了一层

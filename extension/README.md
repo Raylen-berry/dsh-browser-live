@@ -101,8 +101,9 @@
   **Service worker**（Edge：「服务工作线程」）→ 控制台。
 - host 侧状态：`GET http://<DSH_WEB_URL>/bl/bridge`（端口、token、连接状态、**已接入的浏览器列表**、
   各台已授权站点、允许操作开关）；`/bl/state` 多一个 `browsers[]` 与当前活跃的 `use`。
-- 离线自测（不需要真浏览器）：`node tools/verify-extension.mjs`（66）、`node tools/verify-extension-v2.mjs`（146）、
-  `node tools/verify-bridge-v2.mjs`（74）、`node tools/verify-browsers.mjs`（35，两个 Worker 扮演两台浏览器）。
+- 离线自测（不需要真浏览器）：`node tools/verify-extension.mjs`、`node tools/verify-extension-v2.mjs`、
+  `node tools/verify-bridge-v2.mjs`、`node tools/verify-browsers.mjs`（两个 Worker 扮演两台浏览器）。
+  逐套件条数以 `npm test` 输出为准（不写死在这里 —— 写死必然陈旧）。
 - 改了扩展文件后必须回扩展页点一次 **⟳ Reload**（Edge：「重新加载」），浏览器不会自动重载未打包扩展；
   **每台浏览器各点一次**。
 - 扩展文件清单：`background.js`（SW）+ `sid.js`（纯函数，三边共用）+ `popup.html/js` + `manifest.json`。
