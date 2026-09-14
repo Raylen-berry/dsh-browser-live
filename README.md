@@ -278,10 +278,34 @@ v0.9.0 起，**每一次 `browser_*` 工具调用**（含 `browser_open` / `brow
 | 字段 | 含义 |
 |---|---|
 | `type` | `boot`（宿主启动）/ `tool`（工具调用）/ `nav`（页面发起的跳转） |
-| `tool` / `args` | 工具名与参数原文（超 4000 字截断并标注原文长度，不假装完整） |
+| `tool` / `args` | 工具名与参数（超 4000 字截断并标注原文长度，不假装完整）。**敏感输入已脱敏**，见下 |
 | `ok` / `err` / `ms` | 成功与否、错误信息、耗时 |
 | `urlBefore` / `urlAfter` | 调用前后所在页面的 URL —— "他点了什么、落到哪一页"看这里 |
 | `prev` / `h` | 哈希链：`h` 是本条内容的 sha256，`prev` 指向上一条的 `h` |
+
+**敏感输入脱敏（P1 隐私泄漏修复）**：原来 `args` 是**原文落盘**，而 `browser_type` 的返回值
+虽然把 password 字段处理成"只回长度不回显"，参数里的 `text` 仍是明文 —— 于是"往密码框里
+打的字"被持久化写进了审计日志。现在**写之前**先过一遍 `redactAuditArgs()`
+（`audit.js`，纯函数、离线可断言），口径是"敏感输入只留字段名、长度和摘要"：
+
+- `browser_type` 打进的如果是 **password 字段**（判据来自工具返回值里的 `field.type`，
+  是浏览器回读出来的事实，不靠正则猜密码串），`text` 落盘为
+  `{ redacted: true, field: 'text', len: N, sha256: '前12位' }` —— 够日后比对"是不是同一个值"，
+  但不含内容。**普通输入保持原文**：留痕的价值就在于能看出当时打了什么，不做一刀切。
+- 兜底：`args` 里**键名**命中 `password` / `passwd` / `secret` / `token` / `authorization` /
+  `apikey` / `api_key` / `cookie` / `credential` / `session_id` / `otp` 的值（含嵌套）一律同样脱敏，
+  与是哪个工具无关。只按键名判，**不按内容扫**（否则 `D:\secrets\a.png` 这类正常路径也会被吃掉）。
+- `tool` / `ok` / `ms` / `backend` / `urlBefore` / `urlAfter` / `err` / `result` 全部照旧保留。
+- 残留口子：**没走 `browser_type` 的输入不受影响**（例如用 `browser_eval` 直接给
+  `input.value` 赋值 —— 键名不敏感时它就是普通脚本文本，不会被脱敏）。要打密码就用
+  `browser_type`，它才会被认成 password 字段。
+
+`tools/verify-audit-redact.mjs` 把上面这些钉成断言（含"真包装器 `withAudit` 落盘后不含明文"
+和"普通输入必须还能看到原文"两条），跑法：
+
+```powershell
+node tools/verify-audit-redact.mjs   # 期望 PASS 52 项
+```
 
 收口点只有一个：所有工具都在 `index.js` 的注册循环里被 `withAudit()` 包了一层
 （不是逐个工具加埋点 —— 那样必然会漏，新增工具时还会再漏）。

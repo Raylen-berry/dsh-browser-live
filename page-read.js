@@ -977,19 +977,25 @@ export function actionableInPage(kind, key, opts) {
   var el = got.el
 
   var text = String((el.innerText || el.value || el.getAttribute('aria-label') || '')).replace(/\s+/g, ' ').trim().slice(0, 60)
+  // 元素类型（input 的 type / contenteditable）：**只回报类型，绝不回报值**。
+  // browser_type 用它判断"这次输入的目标是不是 password 字段"，好让留痕在**任何失败路径**
+  // （找不到元素之外的情况：被遮挡、disabled、回读失败）都能把 text 脱敏掉 —— 否则
+  // "密码框被浮层盖住"这一路会绕过脱敏。见 audit.js 的 redactAuditArgs。
+  var etype = String(el.getAttribute('type') || '').toLowerCase() || (el.isContentEditable ? 'contenteditable' : '')
   if (el.scrollIntoView) { try { el.scrollIntoView({ block: 'center', inline: 'center' }) } catch (err) { el.scrollIntoView() } }
   var r = el.getBoundingClientRect()
   var s = cs(el)
+  var META = { tag: el.tagName.toLowerCase(), type: etype, text: text }
 
   if (s && (s.display === 'none' || s.visibility === 'hidden' || s.visibility === 'collapse' || parseFloat(s.opacity || '1') <= 0.02)) {
-    return { ok: false, reason: 'hidden', error: '元素自身不可见（display:none / visibility:hidden / opacity:0）', tag: el.tagName.toLowerCase(), text: text }
+    return { ok: false, reason: 'hidden', error: '元素自身不可见（display:none / visibility:hidden / opacity:0）', tag: META.tag, type: META.type, text: META.text }
   }
   var blocking = ancestorsBlocking(el)
-  if (blocking) return { ok: false, reason: 'hidden', error: '元素不可见（' + blocking + '）', tag: el.tagName.toLowerCase(), text: text }
-  if (r.width < 4 || r.height < 4) return { ok: false, reason: 'zero-size', error: '元素尺寸趋近于 0（' + Math.round(r.width) + '×' + Math.round(r.height) + '），点不到', tag: el.tagName.toLowerCase(), text: text }
-  if (s && s.pointerEvents === 'none') return { ok: false, reason: 'pointer-events-none', error: '元素 pointer-events:none（它自己不接收点击，多半该点它的父级/子级）', tag: el.tagName.toLowerCase(), text: text }
+  if (blocking) return { ok: false, reason: 'hidden', error: '元素不可见（' + blocking + '）', tag: META.tag, type: META.type, text: META.text }
+  if (r.width < 4 || r.height < 4) return { ok: false, reason: 'zero-size', error: '元素尺寸趋近于 0（' + Math.round(r.width) + '×' + Math.round(r.height) + '），点不到', tag: META.tag, type: META.type, text: META.text }
+  if (s && s.pointerEvents === 'none') return { ok: false, reason: 'pointer-events-none', error: '元素 pointer-events:none（它自己不接收点击，多半该点它的父级/子级）', tag: META.tag, type: META.type, text: META.text }
   if (opts.needEnabled !== false && (el.disabled === true || el.getAttribute('aria-disabled') === 'true')) {
-    return { ok: false, reason: 'disabled', error: '元素处于 disabled 状态（先让它可用，别硬点）', tag: el.tagName.toLowerCase(), text: text }
+    return { ok: false, reason: 'disabled', error: '元素处于 disabled 状态（先让它可用，别硬点）', tag: META.tag, type: META.type, text: META.text }
   }
 
   var vw = window.innerWidth, vh = window.innerHeight
@@ -1007,11 +1013,11 @@ export function actionableInPage(kind, key, opts) {
     if (x < 0 || y < 0 || x > vw || y > vh) { lastWhy = '目标点 (' + x + ',' + y + ') 在视口外（' + vw + '×' + vh + '）'; continue }
     outside = false
     var h = hit(x, y, el)
-    if (h.ok) return { ok: true, x: x, y: y, tag: el.tagName.toLowerCase(), text: text, tried: i }
+    if (h.ok) return { ok: true, x: x, y: y, tag: META.tag, type: META.type, text: META.text, tried: i }
     lastWhy = h.why
   }
-  if (outside) return { ok: false, reason: 'outside-viewport', error: '元素点在视口外：' + lastWhy + '（先 browser_scroll 或 browser_tabs 再看）', tag: el.tagName.toLowerCase(), text: text }
-  return { ok: false, reason: 'covered', error: '元素被遮挡，5 个候选点都没命中：' + lastWhy, tag: el.tagName.toLowerCase(), text: text, rect: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)] }
+  if (outside) return { ok: false, reason: 'outside-viewport', error: '元素点在视口外：' + lastWhy + '（先 browser_scroll 或 browser_tabs 再看）', tag: META.tag, type: META.type, text: META.text }
+  return { ok: false, reason: 'covered', error: '元素被遮挡，5 个候选点都没命中：' + lastWhy, tag: META.tag, type: META.type, text: META.text, rect: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)] }
 }
 
 export const ACTIONABLE_FN = actionableInPage.toString()

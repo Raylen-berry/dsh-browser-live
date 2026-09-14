@@ -34,7 +34,7 @@
     "NOTICE"
   ],
   "scripts": {
-    "test": "node --check index.js && node --check page-read.js && node --check audit.js && node --check bridge.js && node --check client.js && node --check extension/background.js && node --check extension/sid.js && node --check extension/popup.js && node tools/verify-audit.mjs && node tools/verify-manifest.mjs && node tools/verify-bridge.mjs && node tools/verify-bridge-v2.mjs && node tools/verify-extension.mjs && node tools/verify-extension-v2.mjs && node tools/verify-launch.mjs && node tools/verify-launcher.mjs && node tools/verify-host.mjs && node tools/verify-browsers.mjs && node tools/verify-page-fns.mjs && node tools/verify-web-tools.mjs",
+    "test": "node --check index.js && node --check page-read.js && node --check audit.js && node --check bridge.js && node --check client.js && node --check extension/background.js && node --check extension/sid.js && node --check extension/popup.js && node tools/verify-audit.mjs && node tools/verify-audit-redact.mjs && node tools/verify-manifest.mjs && node tools/verify-bridge.mjs && node tools/verify-bridge-v2.mjs && node tools/verify-extension.mjs && node tools/verify-extension-v2.mjs && node tools/verify-launch.mjs && node tools/verify-launcher.mjs && node tools/verify-host.mjs && node tools/verify-browsers.mjs && node tools/verify-page-fns.mjs && node tools/verify-web-tools.mjs",
     "audit:check": "node tools/verify-audit-chain.mjs"
   },
   "dsh": {

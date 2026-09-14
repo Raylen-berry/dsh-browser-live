@@ -42,7 +42,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { BridgeServer, BRIDGE_FILE, DEFAULT_BRIDGE_PORT } from './bridge.js'
-import { createAudit, trim as auditTrim } from './audit.js'
+import { createAudit, trim as auditTrim, redactAuditArgs } from './audit.js'
 // 页面内注入函数（用 fn.toString() 注入，所以必须是普通函数、不能引用模块作用域的东西）
 import {
   READ_FN, SCRAPE_FN, SEARCH_FN, CHALLENGE_FN, SNAPSHOT_FN, ACTIONABLE_FN, READBACK_FN, FOCUS_SELECTOR_FN,
@@ -277,7 +277,11 @@ function defineToolLite(options) {
 // （逐个加必然会漏，而且以后新增工具又会漏）。
 // 记录内容：工具名、参数（截断但标注长度）、成功/失败、错误信息、耗时、调用前后所在 URL
 // 与 backend —— 这正好回答"他开了浏览器、点了什么、填了什么、去了哪、然后关了没有"。
-function withAudit(tool) {
+// 与 index.js 里其它内部函数一样导出，**为了能被离线测试**：脱敏这件事如果只测
+// audit.js 里的纯函数，把 withAudit 里的 redactAuditArgs(...) 删掉，测试照样全绿
+// —— 那正是这次 P1 泄漏的形态（纯函数对、接线漏了）。tools/verify-audit-redact.mjs
+// 因此直接拿真包装器跑一遍，断言落盘的那条 args 里没有明文。
+export function withAudit(tool) {
   const original = tool && tool.execute
   if (typeof original !== 'function') return tool
   const snapshot = () => {
@@ -304,7 +308,10 @@ function withAudit(tool) {
         const after = snapshot()
         AUDIT.audit('tool', {
           tool: tool.name,
-          args: auditTrim(args, 4000),
+          // 落盘前脱敏（P1 隐私泄漏修复）：敏感输入只留字段名+长度+sha256 摘要。
+          // 判据来自 out.field.type（password 字段是浏览器回读出来的事实），
+          // 普通输入保持原文 —— 留痕的价值就是能看出当时打了什么。详见 audit.js。
+          args: auditTrim(redactAuditArgs(tool.name, args, out, err), 4000),
           ok: !err,
           err: err ? String((err && err.message) || err).slice(0, 400) : undefined,
           ms: Date.now() - t0,
@@ -2018,12 +2025,20 @@ function buildTools(t) {
     async execute(args) {
       const tab = await selectedTab()
       let key = null
+      // 目标的字段类型（不含值）：只用来让留痕把 password 输入的 text 脱敏掉。
+      // **不放进返回值** —— 对 agent 没用，只多一份"这里是密码框"的噪声。
+      const actInfo = {}
       if (args.ref != null && args.ref !== '') key = { kind: 'ref', v: String(args.ref) }
       else if (args.selector) key = { kind: 'selector', v: String(args.selector) }
       if (key && !args.force) {
         const a = await callOnPage(tab, ACTIONABLE_FN, [key.kind, key.v, { needEnabled: true }])
+        if (a && a.type) actInfo.fieldType = a.type
         if (a && a.reason) return a                     // 隐藏/disabled/被遮挡：报确定性原因
         if (a && a.error) return a
+      } else if (key) {
+        // force=true 跳过了可操作性检查，单独问一次字段类型（只问类型，不问值）
+        const probe = await callOnPage(tab, ACTIONABLE_FN, [key.kind, key.v, { needEnabled: false }])
+        if (probe && probe.type) actInfo.fieldType = probe.type
       }
       if (key && key.kind === 'ref') {
         const f = await callOnPage(tab, FOCUS_FN, [key.v])
@@ -2048,7 +2063,10 @@ function buildTools(t) {
           }
         } catch (e) { /* 回读失败不影响"已输入"这个事实 */ }
       }
-      return out
+      // 留给留痕用：把"这次打的是不是 password 字段"这个事实交给 withAudit，
+      // **在返回给 agent 之前删掉**（非枚举不可靠，直接删最稳：schema 与渲染都不该看见它）。
+      if (Object.keys(actInfo).length) out.__audit = actInfo
+      try { return out } finally { delete out.__audit }
     },
   }))
 

@@ -107,6 +107,79 @@ export function trim(v, maxChars) {
   return s.length > maxChars ? s.slice(0, maxChars) + `…[截断，原文 ${s.length} 字]` : s
 }
 
+// ---------------------------------------------------------------------------
+// 落盘前的敏感输入脱敏（P1 隐私泄漏修复）
+// ---------------------------------------------------------------------------
+// 缺陷：`browser_type` 的**返回值**是脱敏过的（password 字段只回长度不回显，
+// page-read.js 的 READBACK_FN），但索引里落盘的 **args.text 是原文** —— 于是
+// "往密码框里打的字"原样写进了 append-only 的审计日志，且日志是持久化的。
+// 修法口径：**敏感输入只留字段名、长度和摘要，不留内容**；普通输入保持原样
+// （留痕的价值就在于能看出当时打了什么，一刀切会把审计变成废物）。
+//
+// 判据（不靠肉眼正则猜密码串）：
+//  ① `browser_type`：这次输入的**目标是不是 password 字段** —— 从工具返回值里认，
+//     即 out.field.type === 'password'（page-read.js 的 readbackInPage 回读出来的
+//     元素 type，是浏览器自己的事实，不是我们猜的）。此时只脱敏其 `text`。
+//  ② 通用兜底：args 里**键名**命中敏感词（含嵌套）的值一律脱敏，与哪个工具无关。
+//     键名是调用方写下的语义标签，比猜内容可靠。
+// 纯函数：不读 DOM、不发请求、不读文件，离线可断言。
+// ---------------------------------------------------------------------------
+
+/** 键名命中即视为敏感（大小写/下划线无关，lastpass / my_token / user_password 都算）。 */
+const SENSITIVE_KEY = /(password|passwd|passphrase|secret|token|authorization|auth|apikey|api_?key|access_?key|cookie|credential|session_?id|otp)/i
+
+/** 值摘要：长度 + sha256 前 12 位。够用来比对"两次是不是同一个值"，但不泄漏内容。 */
+const digest12 = (s) => createHash('sha256').update(String(s), 'utf8').digest('hex').slice(0, 12)
+
+/** 脱敏后的占位结构。`field` 是字段名（便于知道脱敏的是哪一项）。
+ *  摘要算在**原始值的稳定序列化**上：同一个值两次调用得到同一个摘要，才好比对。 */
+export function redactedValue(field, v) {
+  let s = String(v)
+  if (typeof v !== 'string') { try { s = JSON.stringify(v) ?? String(v) } catch { s = String(v) } }
+  return { redacted: true, field, len: s.length, sha256: digest12(s) }
+}
+
+/** 目标这次是不是 password 字段？只认"返回值里带 type 信息"这条——不猜内容。
+ *  三个来源都来自浏览器自己：① 成功时的回读 `field.type`；② 可操作性检查带回来的
+ *  元素 `type`（browser_type 放在 out.__audit.fieldType，被遮挡/disabled/回读失败这些
+ *  失败路径也有）；③ 工具抛错时挂在 error 上的 `fieldType`。 */
+function isPasswordTarget(out, err) {
+  const fromReadback = out && out.field && String(out.field.type || '').toLowerCase() === 'password'
+  if (fromReadback) return true
+  const fromProbe = out && out.__audit && String(out.__audit.fieldType || '').toLowerCase() === 'password'
+  if (fromProbe) return true
+  const fromErr = err && err.fieldType && String(err.fieldType).toLowerCase() === 'password'
+  return !!fromErr
+}
+
+/**
+ * 返回**要落盘的 args 副本**（不改入参）。签名里保留 toolName/out/err 三个入参，
+ * 就是为了让判据来自"工具自己的返回值"，而不是靠调用参数猜。
+ */
+export function redactAuditArgs(toolName, args, out, err) {
+  if (args === null || args === undefined) return args
+  if (typeof args !== 'object') return args          // 标量入参：没有键名可判，原样返回
+  if (Array.isArray(args)) return args.map((v) => redactAuditArgs(toolName, v, out, err))
+
+  const pwTarget = toolName === 'browser_type' && isPasswordTarget(out, err)
+  // 注意 walk 的**键名优先**：命中敏感词就地整块脱敏，不再往里递归 —— 递归就得先看一眼
+  // 那个值，而"先看一眼再决定要不要脱敏"正是这类泄漏的来源。
+  const walk = (v, key) => {
+    if (typeof key === 'string' && SENSITIVE_KEY.test(key)) return redactedValue(key, v)
+    if (pwTarget && key === 'text') return redactedValue('text', v)
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      const o = {}
+      for (const [k2, v2] of Object.entries(v)) o[k2] = walk(v2, k2)
+      return o
+    }
+    return v
+  }
+
+  const copy = {}
+  for (const [k, v] of Object.entries(args)) copy[k] = walk(v, k)
+  return copy
+}
+
 /** 校验一条 JSONL 留痕文件的哈希链。返回 { ok, lines, records, brokenAt, reason }。
  *  两道检查：① 每条自己的 h 与内容对得上（防"改内容"）② 每条 prev 指向上一条的 h（防"删/插行"）。 */
 export function verifyChain(file) {
