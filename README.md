@@ -48,7 +48,7 @@ npm run audit:check            # 只校验留痕哈希链（= node tools/verify-
 **出网边界**：只有 `npm ci` / `npm install` 那一步出网（按 `package-lock.json` 装 devDependencies）。
 `npm test` 本身**不出网** —— 不做真实下载、不调真实模型、不起真浏览器、不读本机 DSH 安装目录。
 
-`tools/run-all.mjs` 把 8 项语法门禁（`node --check`）和 13 套离线测试都跑完再汇总（原来的 `npm test` 是 `&&` 串，
+`tools/run-all.mjs` 把 8 项语法门禁（`node --check`）和 14 套离线测试都跑完再汇总（原来的 `npm test` 是 `&&` 串，
 第一套一失败后面的就不跑了），任一套非 0 退出 ⇒ `npm test` 退出码 1 ⇒ CI 变红。
 CI 用 Node **22 / 24** 两档矩阵、windows-latest。
 
@@ -83,8 +83,9 @@ CI 用 Node **22 / 24** 两档矩阵、windows-latest。
 | `tools/verify-browsers.mjs` | 通过 | 通过 |
 | `tools/verify-result-cap.mjs` | 通过 | 通过 |
 | `tools/verify-launch.mjs` | 通过 | 通过 |
+| `tools/verify-shots-recycle.mjs` | 通过 | 通过 |
 
-合计：8 项语法门禁 + 13 套离线测试全部通过，两档均 `npm test` 退出码 0；逐套件的通过条数以 `npm test` 输出为准。
+合计：8 项语法门禁 + 14 套离线测试全部通过，两档均 `npm test` 退出码 0；逐套件的通过条数以 `npm test` 输出为准。
 
 **未纳入 CI** 的套件（原因同时写在 `tools/run-all.mjs` 的 `EXCLUDED` 里）：
 

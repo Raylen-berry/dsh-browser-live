@@ -44,6 +44,8 @@ const SUITES = [
   'tools/verify-browsers.mjs',      // 35 项
   'tools/verify-result-cap.mjs',    // 67 项
   'tools/verify-launch.mjs',        // 24 项；其中 4 项窗口自查依赖 loadWs 的产品缺陷修复（见 index.js）
+  // v0.16.0 截图自动回收：shots/ 留最近 200 张且 7 天内，其余移入 recycle（只移不删）
+  'tools/verify-shots-recycle.mjs',
 ]
 
 const EXCLUDED = [

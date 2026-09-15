@@ -36,7 +36,7 @@
 // ============================================================================
 
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, renameSync, statSync, rmSync } from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
@@ -102,6 +102,9 @@ const CHROME_PROFILE = (exe) => path.join(BASE_DIR(), 'chrome-profile' + (exe ? 
 const AUDIT_DIR = () => path.join(BASE_DIR(), 'audit')
 const DOWNLOADS_DIR = () => path.join(BASE_DIR(), 'downloads')
 const SHOTS_DIR = () => path.join(BASE_DIR(), 'shots')
+// 截图回收站（v0.16.0）：超额的旧截图**移进来**而不是删掉 —— 只移不删，随时可捞回。
+// 放 cache-control 的存储区旁边：那边管"⑤存储"账本，这里多出来的文件算它的邻居。
+const RECYCLE_DIR = () => path.join(dshHome(), 'dsh-cache-control', 'recycle')
 
 // 留痕实例（2026-09-12）：每一次 browser_* 工具调用、每一次页面自己发起的跳转都追加到
 // $DSH_HOME/dsh-browser-live/audit/YYYY-MM-DD.jsonl；详见 audit.js 顶部的能力边界说明。
@@ -128,6 +131,44 @@ export function compatFlagsFor(exe) {
   return Array.isArray(f) ? f : []
 }
 export { COMPAT_FLAGS }
+
+
+// ------------------------------------------------------------- 截图自动回收（v0.16.0）
+/**
+ * shots/ 只留「最近 SHOTS_KEEP 张 且 7 天内」，其余**移入**回收目录（只移不删）。
+ * 为什么只在写完新截图后顺手跑、不起定时器：截图唯一入口就是 browser_screenshot，
+ * 每次写盘后检查一次天然覆盖所有增长路径；定时器是多活的生命周期（启动/停止/测试都要管），
+ * 收益为零。时间判据用文件 mtime ⇒ 测试直接改 mtime 就能造"第 8 天"的场景。
+ */
+export const SHOTS_KEEP = 200
+export const SHOTS_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
+export function trimShots({ keep = SHOTS_KEEP, maxAgeMs = SHOTS_MAX_AGE_MS, now = Date.now() } = {}) {
+  let entries
+  try { entries = readdirSync(SHOTS_DIR()) } catch { return { moved: 0, kept: 0 } }
+  const files = []
+  for (const name of entries) {
+    if (!name.toLowerCase().endsWith('.png')) continue // 只认截图，别碰旁边的杂项
+    try { files.push({ name, mtime: statSync(path.join(SHOTS_DIR(), name)).mtimeMs }) } catch { /* 刚被删/占用：跳过这一张 */ }
+  }
+  files.sort((a, b) => b.mtime - a.mtime) // 新→旧
+  let moved = 0
+  for (let i = 0; i < files.length; i += 1) {
+    const f = files[i]
+    // 两个判据独立：数量超额（第 keep+1 张起）或 时间超期（>maxAge），任一命中就回收
+    const overCount = i >= keep
+    const tooOld = now - f.mtime > maxAgeMs
+    if (!overCount && !tooOld) continue
+    const src = path.join(SHOTS_DIR(), f.name)
+    let dest = path.join(RECYCLE_DIR(), f.name)
+    try {
+      mkdirSync(RECYCLE_DIR(), { recursive: true })
+      if (existsSync(dest)) dest = path.join(RECYCLE_DIR(), f.name.replace(/\.png$/i, '') + '-' + now + '.png')
+      renameSync(src, dest)
+      moved += 1
+    } catch { /* 跨卷/占用等失败：留着下次再收，绝不因回收影响截图本身 */ }
+  }
+  return { moved, kept: files.length - moved }
+}
 
 // 导出给 tools/settings.mjs 用：让"设置导出/导入"和插件本身**共享同一份默认值**，
 // 不再靠"改那边时这里跟着改"的注释约束（那种约定迟早漂移）。
@@ -2550,7 +2591,9 @@ function buildTools(t) {
       const safe = String(args.name || tab.title || 'shot').replace(/[^\w\-\u4e00-\u9fff]+/g, '_').slice(0, 40) || 'shot'
       const file = path.join(SHOTS_DIR(), safe + '-' + Date.now() + '.png')
       writeFileSync(file, buf)
-      return { ok: true, path: file, bytes: buf.length }
+      // 写完顺手回收超额旧截图（同步、毫秒级，几百张小 PNG 基本零开销）
+      const recycle = trimShots()
+      return { ok: true, path: file, bytes: buf.length, ...(recycle.moved ? { recycled: recycle.moved } : {}) }
     },
   }))
 
