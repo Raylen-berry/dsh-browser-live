@@ -40,20 +40,20 @@ window.__ModuleLoader__.load({
       '.bl-fab:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.16))}',
       '.bl-fab-dot{position:absolute;right:0;top:0;width:5px;height:5px;border-radius:50%;corner-shape:round;background:#3fb96f;box-shadow:0 0 4px rgba(63,185,111,.8)}',
       '.bl-fab-dot.bl-off{background:#b9bfc9;box-shadow:none}',
-      '.bl-fab-stacked{position:fixed;z-index:2147483049}',
+      '.bl-fab-stacked{position:fixed;z-index:2147483450}',
       // 退路样式：量不到遮罩层级时，浮球仍留在顶层，但自己糊成一层磨砂影（小玻璃板 +
       // backdrop-filter 把它身后的内容糊掉），看着像沉在下面，而不是硬邦邦压在上面。
       '.bl-fab-ghost{opacity:.3;filter:blur(2px) saturate(.7);pointer-events:none}',
       '.bl-fab-ghost::before{content:"";position:absolute;inset:-8px -8px -6px;border-radius:14px;background:rgba(20,18,26,.3);backdrop-filter:blur(7px) saturate(.9);box-shadow:inset 0 0 0 1px rgba(255,255,255,.08)}',
       // 兜底球的层级也走样式表（不写行内）：让位时把 style.zIndex 置空才能回到基值
-      '.bl-fab-fallback{position:fixed;left:18px;bottom:18px;z-index:2147483050;box-shadow:0 6px 20px rgba(0,0,0,.22)}',
+      '.bl-fab-fallback{position:fixed;left:18px;bottom:18px;z-index:2147483450;box-shadow:0 6px 20px rgba(0,0,0,.22)}',
       // 面板几何全部走**视口百分比**（v0.12.0）：宽/高/宽屏宽/边距都是"屏幕的多少"，
       // 通过 CSS 变量由设置注入（--bl-pw / --bl-ph / --bl-pww / --bl-gap）。
       // 历史：原来写死 560px/900px —— 2026-09-13 改成 clamp(300px→560px) 那一版仍然有硬上限，
       // 窗口再宽面板也不再变大，宽屏上反而相对变小，用起来就是"固定尺寸"。现在只有两个兜底：极窄窗口的可读下限 min(280px,90vw)（它自己也随视口缩），以及不越出视口的 max-*。
       // 高度的同类问题更明显：以前面板高度完全由截图的宽高比决定，窄而高的窗口里会顶穿视口，
       // 所以现在给 max-height: <ph>vh，舞台 flex:1 + 图片 contain（**照搬独立页 /bl/view 已验证的写法**）。
-      '.bl-panel{position:fixed;right:var(--bl-gap,clamp(10px,1.2vw,22px));bottom:var(--bl-gap,clamp(10px,1.2vh,22px));z-index:2147483050;width:calc(var(--bl-pw,42) * 1vw);min-width:min(280px,90vw);max-width:calc(100vw - 24px);max-height:calc(var(--bl-ph,52) * 1vh);background:var(--dsw-alias-bg-layer-2,#fff);border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.3));border-radius:14px;box-shadow:0 14px 44px rgba(0,0,0,.28);display:flex;flex-direction:column;overflow:hidden;font-size:12px;color:var(--dsw-alias-label-primary,#222)}',
+      '.bl-panel{position:fixed;right:var(--bl-gap,clamp(10px,1.2vw,22px));bottom:var(--bl-gap,clamp(10px,1.2vh,22px));z-index:2147483460;width:calc(var(--bl-pw,42) * 1vw);min-width:min(280px,90vw);max-width:calc(100vw - 24px);max-height:calc(var(--bl-ph,52) * 1vh);background:var(--dsw-alias-bg-layer-2,#fff);border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.3));border-radius:14px;box-shadow:0 14px 44px rgba(0,0,0,.28);display:flex;flex-direction:column;overflow:hidden;font-size:12px;color:var(--dsw-alias-label-primary,#222)}',
       '.bl-panel.bl-wide{width:calc(var(--bl-pww,66) * 1vw)}',
       '.bl-panel.bl-snap{transition:left .16s ease,top .16s ease}',
       '.bl-hd{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.2));flex:none;cursor:grab;user-select:none}',
