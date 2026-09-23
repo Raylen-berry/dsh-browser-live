@@ -237,8 +237,8 @@ ok(routes.has('/bl/bridge'), '/bl/bridge 路由已注册')
   ok(!/clamp\(300px,42vw,560px\)/.test(client), '旧的"42vw 但上限 560px"写法已移除（那就是"固定尺寸"的来源）')
   ok(/\.bl-stage\{[^}]*flex:1 1 auto[^}]*min-height:0/.test(client), '舞台吃满剩余高度（flex + min-height:0）')
   ok(/\.bl-stage img\{[^}]*max-width:100%[^}]*max-height:100%/.test(client), '图片按比例装进舞台（contain，不裁不变形）')
-  // 独立页 /bl/view 本来就是这样写的，面板现在与它一致
-  const viewOk = /#stage\{[^}]*flex:1[^}]*min-height:0/.test(readFileSync(path.join(root, 'index.js'), 'utf8'))
+  // 独立页 /bl/view 本来就是这样写的，面板现在与它一致（v0.16.x 起 VIEW_PAGE 在 view-page.js）
+  const viewOk = /#stage\{[^}]*flex:1[^}]*min-height:0/.test(readFileSync(path.join(root, 'view-page.js'), 'utf8'))
   ok(viewOk, '独立页 /bl/view 仍是同一套百分比写法（两处一致）')
 
   // 残留实例清理：只许碰"本插件 profile"的进程，绝不许误伤用户自己的浏览器

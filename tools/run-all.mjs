@@ -20,12 +20,13 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const LIST_ONLY = process.argv.includes('--list')
 
 // ---- 仓库配置 -------------------------------------------------------------
-const CHECKS = [                        // node --check（纯语法门禁，原 npm test 里已有的那 8 项）
-  'index.js', 'page-read.js', 'audit.js', 'bridge.js', 'client.js',
+const CHECKS = [                        // node --check（纯语法门禁，原 npm test 里已有的那 8 项 + view-page.js）
+  'index.js', 'page-read.js', 'view-page.js', 'audit.js', 'bridge.js', 'client.js',
   'extension/background.js', 'extension/sid.js', 'extension/popup.js',
 ]
 
 const SUITES = [
+  'tools/verify-bridge-isolation.mjs', // 重连隔离：旧连接排队消息与跨浏览器回复不得串会话（2026-09-21）
   'tools/verify-audit.mjs',
   'tools/verify-audit-chain.mjs',
   'tools/verify-audit-redact.mjs',

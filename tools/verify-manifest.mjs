@@ -187,9 +187,12 @@ ok(readmeAll.includes(HISTORY_ANCHOR),
   'README 里有「' + HISTORY_ANCHOR + '」这一节 —— 本段的历史豁免边界就是它（改名/删掉会让豁免范围悄悄变化）', HISTORY_ANCHOR)
 const readmeNow = readmeAll.split(HISTORY_ANCHOR)[0]
 
-// 现状文档：README 的历史章节之前 + docs/ 下每份 .md 全文（设计文档读起来都是现在时）
+// 现状文档：README 的历史章节之前 + docs/ 下每份 .md 全文（设计文档读起来都是现在时）。
+// HISTORY.md / HISTORY-2026-09.md（README 拆分前整本存档）是逐版本记录，与 CHANGELOG 同类
+// （写的是"当时测出来是多少"），同享历史豁免。
+const HISTORY_OK = (n) => n === 'HISTORY.md' || n.startsWith('HISTORY-')
 const scopes = [{ file: 'README.md', text: readmeNow }]
-for (const f of readdirSync(path.join(ROOT, 'docs')).filter((n) => n.endsWith('.md')).sort()) {
+for (const f of readdirSync(path.join(ROOT, 'docs')).filter((n) => n.endsWith('.md') && !HISTORY_OK(n)).sort()) {
   scopes.push({ file: 'docs/' + f, text: readText(path.join('docs', f)) })
 }
 // 套件名当场从 tools/ 取：这样新加一套件、文档里写了它的数，立刻就落在规则里

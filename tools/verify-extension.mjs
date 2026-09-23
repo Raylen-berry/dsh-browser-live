@@ -185,7 +185,8 @@ ok(/^bl-12-/.test(sid), '附加成功并返回合成 sessionId（裸 id，CDP �
 let prefixedOk = ''
 try {
   // 带前缀下发：桥必须按前缀路由到这条连接，扩展必须剥掉前缀用裸 id 命中会话。
-  const prefixed = await srv.send('Runtime.evaluate', { expression: '6*7', returnByValue: true }, 'chrome:' + rawSid(sid))
+  // （v0.3.4 evaluate 收窄后走 BL.evaluate；登记表默认 autoTrustScripts=true）
+  const prefixed = await srv.send('BL.evaluate', { expression: '6*7' }, 'chrome:' + rawSid(sid))
   prefixedOk = String(prefixed?.result?.value)
 } catch (e) { prefixedOk = 'ERR: ' + e.message }
 ok(prefixedOk === '42', '带 `<kind>:` 前缀下发的命令能命中同一条会话（扩展剥前缀，桥按前缀选连接）', prefixedOk)
@@ -197,8 +198,23 @@ const att2 = await srv.send('Target.attachToTarget', { targetId: '12', flatten: 
 ok(att2.sessionId === sid && calls.attach.length === 1, '重复附加复用 sessionId（不重复 attach）')
 
 // ---------------------------------------------------------------- 只读方法透传
-const ev1 = await srv.send('Runtime.evaluate', { expression: '6*7', returnByValue: true }, sid)
-ok(ev1.result.value === 42, 'Runtime.evaluate 透传到 chrome.debugger.sendCommand 并回传结果')
+const ev1 = await srv.send('BL.evaluate', { expression: '6*7' }, sid)
+ok(ev1.result.value === 42, 'BL.evaluate（登记表自动信任）→ Runtime.evaluate 透传到 chrome.debugger.sendCommand 并回传结果')
+// evaluate 收窄的两侧断言：裸 Runtime.evaluate 被白名单拒绝；关掉自动信任后未批准脚本也被拒
+let rawEvalErr = ''
+try { await srv.send('Runtime.evaluate', { expression: '6*7', returnByValue: true }, sid, 2000) } catch (e) { rawEvalErr = e.message }
+ok(/不在白名单/.test(rawEvalErr), '裸 Runtime.evaluate 已从扩展白名单移除（evaluate 收窄）', rawEvalErr)
+await ext.__internals.saveCfg({ autoTrustScripts: false })
+let unapprovedErr = ''
+try { await srv.send('BL.evaluate', { expression: '9*9' }, sid, 2000) } catch (e) { unapprovedErr = e.message }
+ok(/尚未被你批准/.test(unapprovedErr), '关「自动信任固定脚本」后，未批准的表达式被拒', unapprovedErr)
+// 弹窗批准后同一条即可执行
+const pend = (await ext.__internals.POPUP_API.scriptList()).pending
+const h9 = pend.find((p) => p.preview.includes('9*9'))?.hash || ''
+await ext.__internals.POPUP_API.scriptApprove({ hash: h9, approve: true })
+const ev9 = await srv.send('BL.evaluate', { expression: '9*9' }, sid)
+ok(ev9.result.value === null && calls.sendCommand.some((c) => c.method === 'Runtime.evaluate' && c.params.expression === '9*9'), '弹窗逐条批准后该脚本可执行（mock 只认 6*7 → value null，但命令确实下发）')
+await ext.__internals.saveCfg({ autoTrustScripts: true })
 const shot = await srv.send('Page.captureScreenshot', { format: 'jpeg' }, sid)
 ok(shot.data === 'UE5H', 'Page.captureScreenshot 透传（观察窗帧流可用）')
 const lm = await srv.send('Page.getLayoutMetrics', {}, sid)
@@ -341,7 +357,7 @@ await sleep(120)
 ok(calls.detach.some((d) => d.tabId === 12), '撤销站点授权 → chrome.debugger.detach 被调用')
 ok(calls.badge.some((b) => b.tabId === 12 && b.text === ''), '断开后清掉角标')
 let errAfter = ''
-try { await srv.send('Runtime.evaluate', { expression: '1' }, sid, 2000) } catch (e) { errAfter = e.message }
+try { await srv.send('BL.evaluate', { expression: '1' }, sid, 2000) } catch (e) { errAfter = e.message }
 ok(/会话已失效/.test(errAfter), '撤销后旧 sessionId 立刻失效', errAfter)
 
 // ---------------------------------------------------------------- allowAll 开关

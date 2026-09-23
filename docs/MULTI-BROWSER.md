@@ -133,5 +133,7 @@ host → 扩展新增消息：
    v2 扩展一律带前缀，生产路径无此问题。
 2. **`unknown` kind**：非 Chromium（Firefox）装上这份扩展会报 `unknown:`，且 `chrome.debugger` 不存在，
    会四处报错。未加"非 Chromium 直接提示"的守卫。
-3. **用户浏览器档的下载**：`browser_downloads` 仍只列插件实例的目录（接 `chrome.downloads` 仍未做）。
+3. ~~**用户浏览器档的下载**~~（已做，扩展 v0.3.4）：`browser_downloads` 在用户浏览器档走
+   `BL.downloads` → `chrome.downloads.search`，只回文件名/大小/状态（本地路径不外泄），
+   需「允许操作」开着；文件取回仍只在插件实例档（观察窗 ⬇ 链接）。
 

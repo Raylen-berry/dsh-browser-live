@@ -30,10 +30,15 @@ const ALLOWED = new Set([
   'Target.getTargets', 'Target.attachToTarget', 'Target.detachFromTarget',
   'Page.enable', 'Page.getLayoutMetrics', 'Page.captureScreenshot',
   'Page.getNavigationHistory', 'Page.navigate', 'Page.reload', 'Page.navigateToHistoryEntry',
-  'Runtime.enable', 'Runtime.evaluate',
+  // Runtime.enable 留着（事件流要它）；**Runtime.evaluate 已移出白名单** ——
+  // 页面脚本一律经 BL.evaluate + 登记表哈希校验（v0.3.4 evaluate 收窄）。
+  'Runtime.enable',
   'DOM.enable', 'DOM.getDocument', 'DOM.querySelector',
   'Browser.getVersion',
 ])
+// BL.* = host↔扩展的自有命令（不是 CDP 方法）：BL.evaluate 固定脚本分发、BL.downloads 下载列表。
+// 单独放行，**不进** ALLOWED —— 裸 Runtime.evaluate 依旧被白名单挡住。
+const BL_METHODS = new Set(['BL.evaluate', 'BL.downloads'])
 
 // P1 操作层（仅当用户在弹窗里打开「允许操作」时放行）：真鼠标/键盘/滚轮/上传
 const INPUT_METHODS = new Set([
@@ -55,7 +60,7 @@ const DENIED_HINT = {}
 
 // ---- 状态 ------------------------------------------------------------------
 const state = {
-  cfg: { port: 9760, token: '', autoConnect: true, allowAll: false, allowInput: false, allowCloseOwn: true, allowNewTab: true, origins: [] },
+  cfg: { port: 9760, token: '', autoConnect: true, allowAll: false, allowInput: false, allowCloseOwn: true, allowNewTab: true, autoTrustScripts: true, origins: [] },
   // agent **自己**开出来的标签页（新开标签页去已授权站点时记下）。关标签页只放行这些，
   // 你手动开的页面永远不会被关 —— 这是"允许关自己开的页"与"不碰你的页"的分界线。
   ownedTabs: new Set(),
@@ -86,7 +91,7 @@ function note(msg) {
 // ---- 配置持久化 -------------------------------------------------------------
 async function loadCfg() {
   try {
-    const raw = await chrome.storage.local.get(['port', 'token', 'autoConnect', 'allowAll', 'allowInput', 'allowCloseOwn', 'allowNewTab', 'origins'])
+    const raw = await chrome.storage.local.get(['port', 'token', 'autoConnect', 'allowAll', 'allowInput', 'allowCloseOwn', 'allowNewTab', 'autoTrustScripts', 'origins'])
     state.cfg.port = Number.isFinite(raw.port) ? raw.port : 9760
     state.cfg.token = typeof raw.token === 'string' ? raw.token : ''
     state.cfg.autoConnect = raw.autoConnect !== false
@@ -94,6 +99,7 @@ async function loadCfg() {
     state.cfg.allowInput = raw.allowInput === true
     state.cfg.allowCloseOwn = raw.allowCloseOwn !== false
     state.cfg.allowNewTab = raw.allowNewTab !== false   // 默认开：用户明确要求"能新开页"
+    state.cfg.autoTrustScripts = raw.autoTrustScripts !== false   // 默认开：登记表只收 host 固定脚本（见 BL.evaluate）
     state.cfg.origins = Array.isArray(raw.origins) ? raw.origins.filter((x) => typeof x === 'string') : []
   } catch { /* 首用默认 */ }
   return state.cfg
@@ -105,6 +111,7 @@ async function saveCfg(patch) {
       port: state.cfg.port, token: state.cfg.token, autoConnect: state.cfg.autoConnect,
       allowAll: state.cfg.allowAll, allowInput: state.cfg.allowInput, allowCloseOwn: state.cfg.allowCloseOwn,
       allowNewTab: state.cfg.allowNewTab,
+      autoTrustScripts: state.cfg.autoTrustScripts,
       origins: state.cfg.origins,
     })
   } catch { /* ignore */ }
@@ -125,6 +132,51 @@ export function isAllowed(url) {
   if (state.cfg.allowAll) return true
   const o = originOf(url)
   return !!o && state.cfg.origins.includes(o)
+}
+
+// ---- 页面脚本登记表（evaluate 收窄，v0.3.4）----------------------------------
+// BL.evaluate 只执行哈希命中登记表的表达式。登记表在 chrome.storage.local，SW 重启不丢。
+// 首次连上 host 时整表为空 —— 之后**每一条被执行的源都要用户过目**：host 发来的第一条
+// 会进待确认队列并在扩展图标上提示；确认后同一条固定脚本（工具函数源是稳定的字符串）
+// 长期有效，日常使用不会反复打扰。未确认前所有页面读取（snapshot/text/read/…）都会
+// 明确报错说明原因，而不是静默降级。
+let scriptHashes = null   // Set<string>，null = 还没从 storage 读出来
+const pendingScripts = new Map()   // hash -> 表达式原文（等待用户确认）
+
+async function loadScriptRegistry() {
+  if (scriptHashes) return scriptHashes
+  try {
+    const raw = await chrome.storage.local.get(['blScriptHashes'])
+    scriptHashes = new Set(Array.isArray(raw.blScriptHashes) ? raw.blScriptHashes : [])
+  } catch { scriptHashes = new Set() }
+  return scriptHashes
+}
+async function saveScriptRegistry(set) {
+  try { await chrome.storage.local.set({ blScriptHashes: [...set].slice(-200) }) } catch { /* ignore */ }
+}
+async function scriptRegistered(h) {
+  const set = await loadScriptRegistry()
+  return set.has(h)
+}
+/** 弹窗动作：批准/撤销某条脚本哈希。 */
+export async function approveScript(hash, approve = true) {
+  const set = await loadScriptRegistry()
+  if (approve && /^[0-9a-f]{64}$/.test(String(hash))) {
+    set.add(String(hash))
+    pendingScripts.delete(String(hash))
+  } else if (!approve) {
+    set.delete(String(hash))
+  }
+  await saveScriptRegistry(set)
+  return { ok: true, count: set.size }
+}
+export function pendingScriptList() {
+  return [...pendingScripts.entries()].map(([h, expr]) => ({ hash: h, preview: String(expr).slice(0, 160) }))
+}
+
+async function sha256Hex(text) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(text)))
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('')
 }
 
 /**
@@ -313,7 +365,7 @@ export async function handleCommand({ method, params = {}, sessionId }) {
     note(`agent 新开标签页 #${tab.id} → ${url.slice(0, 80)}`)
     return { targetId: String(tab.id) }
   }
-  const allowedNow = ALLOWED.has(method) || (isInputMethod(method) && state.cfg.allowInput === true)
+  const allowedNow = ALLOWED.has(method) || BL_METHODS.has(method) || (isInputMethod(method) && state.cfg.allowInput === true)
   if (!allowedNow) throw new Error(deniedReason(method))
 
   // —— 会话管理：Target.* 由扩展自己实现（chrome.debugger 没有 CDP 的 Target 域）
@@ -342,6 +394,58 @@ export async function handleCommand({ method, params = {}, sessionId }) {
   }
   if (method === 'Browser.getVersion') {
     return { product: navigator.userAgent, protocolVersion: '1.3', jsVersion: '', userAgent: navigator.userAgent }
+  }
+
+  // —— 下载列表：chrome.downloads 的直接能力，不经调试器（v0.3.4）。
+  // host 在用户浏览器档调 `BL.downloads`（不是 CDP 方法）；返回形状与插件实例档对齐。
+  // 边界：只读元数据（文件名/大小/状态/URL），不碰文件内容、不给 downloadPath ——
+  // 用户 Chrome 的本地路径不进 agent 上下文。
+  if (method === 'BL.downloads') {
+    // 权限门禁与「允许操作」同级：下载列表能看到"你在逛哪些站、下了什么文件"，
+    // 默认只读档不暴露；用户开着「允许操作」才视为同意给出这份信息。
+    if (state.cfg.allowInput !== true) throw new Error('已拒绝：读取你的下载记录需要你在扩展弹窗里打开「允许操作」')
+    const items = await chrome.downloads.search({ limit: 60, orderBy: ['startTime'] })
+    const files = (items || []).map((d) => ({
+      file: String(d.filename || '').split(/[\\/]/).pop() || '(未知)',
+      bytes: Number(d.fileSize) || 0,
+      state: d.state || '',
+      url: String(d.url || '').slice(0, 200),
+      startTime: d.startTime || '',
+    }))
+    return { dir: '(你的' + KIND_NAME + '下载目录，路径不外泄)', files, backend: 'user' }
+  }
+
+  // —— 固定脚本分发（evaluate 收窄，v0.3.4）：host 的页面注入一律走 `BL.evaluate`，
+  // 只执行**登记表哈希命中**的表达式；裸 `Runtime.evaluate` 已从白名单移除。
+  // 挡的是"agent 现编脚本进你的浏览器"：要执行必须先被登记，而登记项都是插件自带的
+  // 固定函数源（snapshot/read/scrape/…）。护栏仍是逐站点授权 + 「允许操作」+ 调试横幅。
+  if (method === 'BL.evaluate') {
+    const expression = String(params.expression || '')
+    if (!expression) throw new Error('缺少 expression')
+    const h = await sha256Hex(expression)
+    if (!(await scriptRegistered(h))) {
+      // 没批准过：先进待确认队列（弹窗里逐条过目），再明确拒绝 —— 绝不静默执行。
+      if (!pendingScripts.has(h)) {
+        pendingScripts.set(h, expression)
+        note(`有待确认的页面脚本（${h.slice(0, 12)}…）：在扩展弹窗「脚本登记表」里过目`)
+      }
+      // 「自动信任固定脚本」（默认开）：登记表里的条目都来自 host 插件源码（callOnPage /
+      // pageScript 统一出口，agent 现编的表达式到不了这里），首见即登记、当次直接放行。
+      // 关掉它则每条脚本都要在弹窗「脚本登记表」里人工点一次「允许」。
+      if (state.cfg.autoTrustScripts === true) {
+        const set = await loadScriptRegistry()
+        set.add(h); pendingScripts.delete(h)
+        await saveScriptRegistry(set)
+        note(`已自动登记页面脚本（${h.slice(0, 12)}…）—— 关「自动信任固定脚本」可改为逐条确认`)
+      } else {
+        throw new Error('已拒绝：该页面脚本尚未被你批准（evaluate 已收窄为固定脚本下发）。打开扩展弹窗 →「脚本登记表」→ 查看待确认条目并允许')
+      }
+    }
+    if (!sid) throw new Error('缺少 sessionId（先 Target.attachToTarget）')
+    const tabId = state.sessions.get(sid)
+    if (tabId === undefined) throw new Error('会话已失效（标签页被关或已断开），重新 browser_open')
+    return await chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate',
+      { expression, returnByValue: true, awaitPromise: true })
   }
 
   if (!sid) throw new Error('缺少 sessionId（先 Target.attachToTarget）')
@@ -387,14 +491,39 @@ export function status() {
   }
 }
 
+// ---- 端口发现（2026-09-23 Edge/Chrome ERR_CONNECTION_REFUSED）------------------
+// host 的桥在默认口被占时会顺延到 9761…9780，而扩展存的是**当初粘 token 那次**的口。
+// 连不上时与其死守旧口，不如扫一遍 /bl/bridge-info（该端点不含 token，专供发现）找真口。
+const PORT_SCAN_FROM = 9760
+const PORT_SCAN_TO = 9780
+async function discoverPort(preferred) {
+  const tryPort = async (p) => {
+    try {
+      const ctl = new AbortController()
+      const timer = setTimeout(() => ctl.abort(), 1200)
+      const r = await fetch(`http://127.0.0.1:${p}/bl/bridge-info`, { signal: ctl.signal, cache: 'no-store' })
+      clearTimeout(timer)
+      const j = await r.json().catch(() => null)
+      return !!(j && j.ok === true && j.service === 'dsh-browser-live-bridge')
+    } catch { return false }
+  }
+  if (await tryPort(preferred)) return preferred
+  for (let p = PORT_SCAN_FROM; p <= PORT_SCAN_TO; p++) {
+    if (p === preferred) continue
+    if (await tryPort(p)) { note(`发现桥实际在端口 ${p}（存的是 ${preferred}）`); state.cfg.port = p; saveCfg({ port: p }); return p }
+  }
+  return preferred   // 没扫到：退回存的口，让 onerror 给出原来的提示
+}
+
 export async function connect() {
   await loadCfg()
   if (state.ws && (state.ws.readyState === 0 || state.ws.readyState === 1)) return status()
   if (!state.cfg.token) { state.lastError = '还没有粘贴 token：打开 $DSH_HOME/dsh-browser-live/bridge.json 复制 token'; return status() }
   clearTimeout(state.retry); state.retry = null
   state.lastError = ''
+  const port = await discoverPort(state.cfg.port)
   let ws
-  try { ws = new WebSocket(WS_URL(state.cfg.port)) } catch (e) { state.lastError = String(e?.message || e); return status() }
+  try { ws = new WebSocket(WS_URL(port)) } catch (e) { state.lastError = String(e?.message || e); return status() }
   state.ws = ws
   // 旧 socket 的 close 事件可能晚于新 socket 的建立 —— 只有"当前 socket"才允许改状态
   const isCurrent = () => state.ws === ws
@@ -559,6 +688,16 @@ const POPUP_API = {
     await saveCfg({ allowNewTab: !!flag })
     note(flag ? '已允许 agent 新开标签页' : '已关闭：agent 不能再新开标签页')
     return status()
+  },
+  // —— 脚本登记表（evaluate 收窄，v0.3.4）：弹窗里逐条过目 host 要注入页面的固定脚本。
+  async scriptList() {
+    const set = await loadScriptRegistry()
+    return { approved: [...set], pending: pendingScriptList() }
+  },
+  async scriptApprove(payload) {
+    const h = String((payload && payload.hash) || '')
+    if (!h) throw new Error('缺少 hash')
+    return await approveScript(h, payload.approve !== false)
   },
 }
 

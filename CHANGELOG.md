@@ -1,5 +1,84 @@
 # 变更记录
 
+## 2026-09-23 · 本地维护：桥端口漂移修复（Chrome ERR_CONNECTION_REFUSED）
+
+**现场**：Chrome 扩展错误页报 `background.js` 连 `ws://127.0.0.1:9760/bl/bridge` 被拒。
+排查：9760 **有人监听但不是本插件的桥**（本机另有一个 DSH node 实例占着），真桥在顺延后的口上，
+而扩展存的还是 9760 —— "服务没起来"的判断不成立，是**双方各信一个口**。
+
+**根因**（复现脚本坐实）：两个宿主实例共用同一份 `bridge.json` 时互相覆盖；
+且 `start()` 拿 `cfg.port || wantPort` 当首选口 ⇒ 只要默认口上有个旧实例活着，新实例**永远**
+漂到 9761+，扩展里粘过一次的口就对不上。防火墙/占用都不是主因。
+
+**改法**（两侧各补一刀）：
+- host：`BridgeServer.start()` 首选口改为 `wantPort || cfg.port`（默认恒 9760），被占才顺延；
+  `bridge.json` 仍如实写实际口。
+- 扩展（v0.3.5）：连接前扫一遍 `/bl/bridge-info`（该端点不含 token，专供发现）在 9760…9780
+  里找真桥并记住它 —— 就算别的程序占着默认口导致桥顺延，扩展也能自己找到，不再死守粘过
+  token 那次的旧口。Edge 错误页的 `ERR_CONNECTION_REFUSED` 与 Chrome 同病同源。
+
+用户当下解法二选一：关掉多余的 DSH 实例后重启 DSH Desktop（桥回到 9760）；
+或在扩展弹窗把端口改成 bridge.json 里的实际值再点连接。装 v0.3.5 扩展后此问题自愈。
+
+验证：verify-bridge 23/23、verify-bridge-v2 74/74、verify-extension 80/80、verify-browsers 35/35、
+`npm test` 全绿。
+
+## 2026-09-22 · 本地维护：瘦身第二批 + 接管安全两项（downloads / evaluate 收窄）
+
+**瘦身**
+- **VIEW_PAGE 抽出 `view-page.js`**：119 行独立观察页从 `apply()` 里搬出，index.js −129/+12；
+  `tools/check-view-page.mjs`、`verify-panel-health.mjs` 的读取源同步改到 view-page.js，
+  run-all CHECKS 加一项（语法门禁 8→9）。launcher/tool-defs 拆分**评估后不做**：那两块与模块态
+  交叉引用太密（会话表/锁/帧循环互相摸），拆出的收益 < 回归风险。
+- **client.js `api()` 收敛为直接返回 JSON**：原来每个调用方都要手写 `.then(r=>r.ok?r.json():null)`，
+  漏一次就是 v0.4.0 那个 "j.liveView 恒 undefined" 的事故；现在统一在 api() 一处，删掉 9 处手写解包。
+- **README 再瘦 96 行（600⇒504）**：「留痕」细节移入 `docs/AUDIT-DETAILS.md`，
+  「三层开关/硬约束/被拒清单/已知缺口」移入 `docs/TAKEOVER-CONTROLS.md`，原位各留指针。
+
+**接管安全（扩展 v0.3.3 → v0.3.4）**
+- **`browser_downloads` 接 `chrome.downloads`**：用户浏览器档不再只列插件目录 —— host 发
+  `BL.downloads`（非 CDP 命令），扩展回文件名/大小/状态/来源 URL，**本地路径不外泄**；
+  门禁与「允许操作」同级（下载记录能看到你在逛哪些站）。manifest 加 `downloads` 权限。
+- **evaluate 收窄 = 固定脚本下发**（README「已知缺口」的待办落地）：裸 `Runtime.evaluate`
+  移出扩展白名单；host 所有页面注入统一走 `pageScript()` → `BL.evaluate {expression}`，
+  扩展只执行**登记表哈希命中**的表达式（sha256 命中才放行）。登记表存 chrome.storage.local，
+  `autoTrustScripts` 默认开（host 固定脚本首见即登记——agent 现编的表达式没有工具替它登记，进不去）；
+  关掉后每条脚本要在弹窗「脚本登记表」人工批准。browser_eval 在用户浏览器档会被拒并给出换路提示。
+- 测试：verify-extension 新增 3 条断言（裸 evaluate 被拒 / 关自动信任后未批准被拒 / 弹窗批准后放行），
+  77→80 passed；result-cap 的真链路（假浏览器过真桥真扩展）全绿。
+
+**SKILL.md**：§10 下载条目写清两档差异；§11 写明 browser_eval 在用户浏览器档被收窄是设计不是故障。
+
+验证：`npm test` 语法门禁 9/9、离线套件 15/15；`verify-page-fns` 121/121、`verify-web-tools` 44/44、
+`verify-host` 93/93（三套真起 Chromium；host 里读 VIEW_PAGE 的断言随抽取改读 view-page.js）；
+`check-view-page` OK。**升级后需重载插件（重启 DSH Desktop）+ 在 Chrome/Edge
+里重新「加载解压缩的扩展」（v0.3.4 多了 downloads 权限）。**
+
+## 2026-09-21 · 本地维护：扩展连接隔离（回归测试补全）
+
+- 重连后忽略旧连接排队中的消息；Chrome/Edge 的回复、事件和断开通知不得冒用另一浏览器的会话前缀。
+- 忽略 null、数组等非协议消息，避免 JSON 解析成功后访问字段导致崩溃。
+- 新增旧连接与跨浏览器消息回归验证（`tools/verify-bridge-isolation.mjs`，已登记进 run-all SUITES）；
+  启动器测试使用独立临时 DSH_HOME，避免触碰真实浏览器设置。
+
+## 2026-09-22 · 本地维护：代码瘦身 + 行尾根治
+
+- **FOCUS_SELECTOR_FN 并入 FOCUS_FN**：`page-read.js` 的 `focusSelectorInPage` 与 `index.js` 的
+  `FOCUS_FN` 做的是同一件事（聚焦 + 全选），只差 ref/selector 一步解析 —— selector 的非法/未命中
+  已由 ACTIONABLE_FN 先拦下，再包一层 try/catch 属重复劳动。合并后 ref 以 `\u0000` 前缀传递避免与
+  `#id` 撞车；净删约 30 行。回归：`verify-web-tools`（真 Chromium 走 browser_type 的 ref+selector 两路）。
+- **package.json description 从 3273 字 → 817 字**：原来把 v0.5.0~v0.12.0 的全部修复史塞进 manifest，
+  每次装载都占宿主上下文；现在只留"它是什么、能力边界、换机须知"，演进记录指回 CHANGELOG。
+- **README 历史区拆出**：「版本与变更记录」整节移入 `docs/HISTORY.md`（README 910 ⇒ ~600 行），
+  README 现状章节保留全部被 verify-manifest D 段钉住的静态事实（8 项门禁 / 15 套离线 / 21 个工具 /
+  3 套未纳入 CI / SKILL 节数剧本数），并在 docs/ 扫描里给 HISTORY*.md 加历史豁免（与 CHANGELOG 同类）。
+  旧版 README 全文存档为 `docs/HISTORY-2026-09.md`；逐套件通过数的对照表一并删除（口径本就是"跑出来为准"）。
+- **行尾根治**：仓库无 `.gitattributes` 而本机 `core.autocrlf=true` ⇒ 工作区 CRLF、blob LF。
+  ① 加 `.gitattributes`（`* text=auto eol=lf`）并置本仓库 `core.autocrlf=false`；
+  ② `tools/check-view-page.mjs` 的 endMark 去掉行尾依赖（它在 Windows 上因 CRLF 必挂，属既有坑）。
+- 验证：`npm test` 语法门禁 8/8、离线套件 16/16 全绿；`verify-page-fns` 121/121、
+  `verify-web-tools` 44/44（两套真起 Chromium，覆盖合并后的聚焦路径）。
+
 ## 0.16.0 — 2026-09-15 · 截图自动回收：shots/ 只留最近 200 张且 7 天内，其余移入回收目录
 
 **背景**（用户定的第 6 项）：`browser_screenshot` 每次调用都往 shots/ 落一张 PNG，从不回收 ——

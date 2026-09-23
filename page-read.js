@@ -1027,22 +1027,10 @@ export function actionableInPage(kind, key, opts) {
 export const ACTIONABLE_FN = actionableInPage.toString()
 
 // ---------------------------------------------------------------------------
-// 按 CSS 选择器聚焦（browser_type 用）。
-// 单独成函数而不是在 index.js 里拼字符串：手拼 `document.querySelector(' + JSON.stringify(css) + ')`
-// 这种写法一旦括号数目对不上，报错是页面里的 SyntaxError，排查成本远高于写在这儿让 node --check 兜住。
+// （原 focusSelectorInPage / FOCUS_SELECTOR_FN 已并入 index.js 的 FOCUS_FN：
+//   browser_type 先跑 ACTIONABLE_FN，selector 非法/未命中在那里就返回错误了，
+//   这里再包一层 try/catch 与"未命中"文案属于重复劳动；ref 与 selector 只差解析一步。）
 // ---------------------------------------------------------------------------
-export function focusSelectorInPage(css) {
-  var el = null
-  try { el = document.querySelector(String(css || '')) } catch (e) { return { error: '选择器无效: ' + css } }
-  if (!el) return { error: 'selector 未命中: ' + css }
-  if (el.scrollIntoView) { try { el.scrollIntoView({ block: 'center', inline: 'center' }) } catch (e) { el.scrollIntoView() } }
-  try { el.focus() } catch (e) { }
-  var tag = el.tagName.toLowerCase()
-  if ((tag === 'input' || tag === 'textarea') && typeof el.select === 'function' && el.type !== 'password' && el.type !== 'file' && !el.readOnly) el.select()
-  return { ok: true, tag: tag, text: String(el.innerText || el.value || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim().slice(0, 60) }
-}
-
-export const FOCUS_SELECTOR_FN = focusSelectorInPage.toString()
 
 // ---------------------------------------------------------------------------
 // 输入回读：type 之后确认"值真的进去了"。

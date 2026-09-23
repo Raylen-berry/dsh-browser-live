@@ -134,6 +134,7 @@ class BridgeChannel {
       this.pending.set(id, {
         resolve: (v) => { clearTimeout(timer); resolve(v) },
         reject: (e) => { clearTimeout(timer); reject(e) },
+        ws: this.ws,   // 归属标记：重连后同 kind 换 socket，旧连接迟到的回包对不上号 → 丢
       })
       try { this.ws.send(JSON.stringify({ type: 'cdp', id, method, params, ...(sessionId ? { sessionId } : {}) })) }
       catch (e) { clearTimeout(timer); this.pending.delete(id); reject(e) }
@@ -377,6 +378,10 @@ export class BridgeServer {
   async start() {
     if (this.http) return this.status()
     const { WebSocketServer } = this.wsMod
+    // 端口顺延：9760 被占就试 9761…9780。首选**永远是 wantPort（默认 9760）**，不信
+    // bridge.json 里存的旧口 —— 那份配置可能是上次运行甚至别的宿主实例留下的，拿它当首选
+    // 会稳定撞上同一个占用者，每次重启都顺延到别的口，扩展那边存的口就对不上
+    // （2026-09-23 Chrome ERR_CONNECTION_REFUSED 的根因）。
     const cfg = loadBridgeConfig(this.baseDir, { port: this.wantPort })
     this.token = cfg.token
     mkdirSync(this.baseDir, { recursive: true })
@@ -408,7 +413,7 @@ export class BridgeServer {
           resolve({ ok: true, port: typeof actual === 'object' && actual ? actual.port : p })
         })
       }
-      attempt(cfg.port || this.wantPort)
+      attempt(this.wantPort || cfg.port)
     })
     if (!bound.ok) throw new Error('桥端口无法监听：' + (bound.error?.message || 'unknown'))
 
@@ -450,6 +455,8 @@ export class BridgeServer {
     ws.on('message', (data) => {
       let msg
       try { msg = JSON.parse(typeof data === 'string' ? data : data.toString('utf8')) } catch { return }
+      // 合法 JSON 但不是协议对象（null / 数组 / 数字）：直接忽略，别往下摸字段把 worker 弄崩
+      if (msg === null || typeof msg !== 'object' || Array.isArray(msg)) return
 
       if (!authed) {
         if (msg.type !== 'hello' || !safeEqual(msg.token, this.token)) {
@@ -492,24 +499,31 @@ export class BridgeServer {
       }
 
       if (msg.type === 'cdp' && msg.id !== undefined) {
-        // §3：回包里带 sessionId 就按前缀找到那条连接的 pending；找不到就忽略（不抛）
-        let target = chan
+        // §3：回包里带 sessionId 就按前缀找到那条连接的 pending；找不到就忽略（不抛）。
+        // 归属**永远以当前注册表为准**，不信消息自带的 chan：同 kind 重连后旧 socket 的排队
+        // 回包会带着已失效的 chan 进来 —— 那种"迟到的旧连接回复"必须丢，否则会把新连接的
+        // pending 用过期结果 resolve 掉（2026-09-21 隔离修复，verify-bridge-isolation.mjs 钉住）。
+        let target = null
         if (msg.sessionId !== undefined && msg.sessionId !== null && msg.sessionId !== '') {
           const kind = sessionKind(msg.sessionId)
           target = (kind && this.conns.get(kind)) || null
-          if (!target) return   // 回包无法归属 → 丢掉
+        } else if (chan && this.conns.get(chan.kind) === chan) {
+          target = chan   // 无 sessionId（v1 扩展）：只认"仍是当前注册的那条连接"
         }
-        if (!target) return
+        if (!target) return   // 回包无法归属 / 来自已被取代的连接 → 丢掉
         const p = target.pending.get(msg.id)
-        if (!p) return
+        if (!p || p.ws !== ws) return   // pending 不在这条 socket 上（旧连接迟到的回复）→ 丢
         target.pending.delete(msg.id)
         if (msg.error) p.reject(new Error(String(msg.error.message || msg.error)))
         else p.resolve(msg.result)
         return
       }
       if (msg.type === 'event' && msg.method) {
-        // 事件归属看前缀；缺前缀（v1 扩展）时退回"发起连接"，避免丢事件
-        const kind = sessionKind(msg.sessionId) || chan.kind
+        // 事件归属看前缀；缺前缀（v1 扩展）时退回"发起连接"，避免丢事件。
+        // 同样要挡"被取代的旧连接"推来的事件：kind 必须是它、且注册表里还是它。
+        const kind = sessionKind(msg.sessionId) || (chan ? chan.kind : null)
+        if (!kind) return
+        if (this.conns.get(kind) !== chan) return   // 跨浏览器冒用前缀 / 旧连接迟到事件 → 丢
         this.emit(msg.method, { ...(msg.params || {}), ...(msg.sessionId !== undefined ? { sessionId: msg.sessionId } : {}) }, kind)
         return
       }

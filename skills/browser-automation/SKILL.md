@@ -199,8 +199,11 @@ browser_search {query: "关键词", engineSpec: {             # 自带引擎：�
 - **上传**：`browser_upload {files:["D:\\\\a.png"], ref:"12"}`（ref 可指按钮/拖拽区/React 组件容器）。
   单文件控件不能一次传多个；**与控件里现有文件同名时 Chrome 不再触发 change**，要重传就刷新页面或换文件名。
   传完用 `browser_wait {textContains:"上传完成"}` 等状态，不要立刻截图当证明。
-- **下载**：文件落在 `$DSH_HOME/dsh-browser-live/downloads/`，用 `browser_downloads` 看清单。
-- **多标签页**：`browser_tabs {action:"list|new|select|close", index}`。切换后**必须重新 snapshot**。
+- **下载**：插件自带实例档落在 `$DSH_HOME/dsh-browser-live/downloads/`，`browser_downloads` 看清单并可从观察窗取回。
+  「你的浏览器」档（use:"edge"/"chrome"）走扩展的 `chrome.downloads`（v0.3.4）：只列文件名/大小/状态，
+  本地路径不外泄，且需弹窗「允许操作」开着 —— 要看用户自己浏览器的下载记录前先确认这一点。
+- **多标签页**：`browser_tabs {action:"list|new|select", index}`。切换后**必须重新 snapshot**。
+  `close` 只关 agent 自己开的页（你手动开的任何情况下不动）。
 
 ---
 
@@ -211,6 +214,11 @@ browser_search {query: "关键词", engineSpec: {             # 自带引擎：�
 
 不要用它来：绕过授权、批量抓数据（用 `browser_scrape`）、模拟点击（用 `browser_click`）、
 在用户浏览器里执行有副作用的脚本。审计留痕会记下每次调用的脚本，别写你不希望被记录的东西。
+
+**「你的浏览器」档已收窄为固定脚本下发（host v0.16.x / 扩展 v0.3.4）**：裸
+`Runtime.evaluate` 移出扩展白名单，所有注入都要过扩展侧登记表 —— 现编表达式通常会被拒。
+这不是故障，是设计：被拒后改用 read/text/scrape/snapshot，或 `{use:"plugin"}` 切回自带实例，
+**不要**试图找绕法。
 
 ---
 

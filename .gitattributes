@@ -1,0 +1,4 @@
+# 仓库内一律 LF：blob 本来就是 LF，但本机 core.autocrlf=true 会把工作区 checkout 成 CRLF。
+# 插件里有按**源文本字面量**抠代码的开发工具（tools/check-view-page.mjs 找 "].join('\n')"），
+# 行尾一换它们就在 Windows 上必挂 —— 统一 eol=lf 根治，别再依赖每台机器的 autocrlf 配置。
+* text=auto eol=lf

@@ -51,15 +51,16 @@
 | 站点 | 按 `origin` 白名单，**每台浏览器各自一份**。未授权的标签页，**url 和标题对 agent 一律打码**（`(未授权站点)`），也拒绝附加调试器 |
 | 标签页 | 只有被你允许的站点才会被 `chrome.debugger.attach`；被接管的标签页在工具栏显示红点角标 |
 | 操作 | 「允许操作」默认**关**。关着时 `Input.*` / `DOM.setFileInputFiles` 一律拒绝，并提示去哪里打开 |
-| 只读方法 | `Target.getTargets/attachToTarget/detachFromTarget`、`Page.enable/getLayoutMetrics/captureScreenshot/getNavigationHistory/navigate/reload/navigateToHistoryEntry`、`Runtime.enable/evaluate`、`DOM.enable/getDocument/querySelector`、`Browser.getVersion` |
+| 只读方法 | `Target.getTargets/attachToTarget/detachFromTarget`、`Page.enable/getLayoutMetrics/captureScreenshot/getNavigationHistory/navigate/reload/navigateToHistoryEntry`、`Runtime.enable`、`DOM.enable/getDocument/querySelector`、`Browser.getVersion`。**`Runtime.evaluate` 已移出**（v0.3.4）：页面脚本走 `BL.evaluate` + 登记表哈希校验 |
+| 下载记录 | `BL.downloads`（非 CDP，v0.3.4）：`browser_downloads` 在用户浏览器档走它 → `chrome.downloads.search`。**需「允许操作」开着**；只回文件名/大小/状态/来源 URL，本地路径不外泄 |
 | 新开标签页 | 弹窗开关「允许 agent 新开标签页」，**默认开**（v0.3.2 起）。只允许开到 `http/https/about`；新开的页记进 `ownedTabs`，即"agent 自己开的页"，只有这些页允许被它关。**新开 ≠ 能看**：未授权站点照旧打码、照旧拒附加调试器 |
 | 永远拒绝 | `Target.activateTarget`、`Page.close/bringToFront`、`Network.*`、`Emulation.*`、`DOM.setAttributeValue`（`Target.createTarget` 见上一行，`Target.closeTarget` 只放行 agent 自己开的页） |
 | 高危开关 | 「允许所有网站」= 放弃逐站点确认，等于把该浏览器全部登录态交给 agent，默认关 |
 
-**已知缺口（诚实说）**：`Runtime.evaluate` 在白名单里，因为 snapshot/text 都靠它取正文 ——
-也就是说扩展拦得住 `Input.*` 这类"合成输入"，但拦不住页面内 JS 自己去点一个按钮
-（`browser_eval` 理论上仍能代打）。真正的护栏是「逐站点授权 + 允许操作开关 + Chrome 调试横幅 + 你看得见」。
-收窄 evaluate（改成固定脚本下发）仍是待办。
+**已知缺口（v0.3.4 已收窄）**：裸 `Runtime.evaluate` 已从白名单移除 —— host 注入页面的脚本一律走
+`BL.evaluate`，扩展只执行**登记表哈希命中**的表达式（默认自动登记 host 固定脚本；弹窗「脚本登记表」
+可改为逐条人工批准）。agent 现编的 JS 进不了你的浏览器。剩下的护栏仍是
+「逐站点授权 + 允许操作开关 + Chrome 调试横幅 + 你看得见」。
 
 ## 运行时约束（实测，v0.6.0）
 

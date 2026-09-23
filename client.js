@@ -159,7 +159,10 @@ window.__ModuleLoader__.load({
 
     function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] }) }
     function trimUrl(u) { return String(u || '').replace(/^https?:\/\//, '').slice(0, 64) }
-    function api(path, opts) { return fetch(path, opts).catch(function () { return null }) }
+    // api()：GET/POST 统一返回**解析后的 JSON**（失败或非 2xx = null）。
+    // v0.16.x 前它返回 Response，每个调用方都要手写 .then(r=>r.ok?r.json():null)——
+    // 漏一次就是 v0.4.0 那个 "j.liveView 恒 undefined" 的 bug。现在收敛在这一处。
+    function api(path, opts) { return fetch(path, opts).then(function (r) { return r && r.ok ? r.json() : null }).catch(function () { return null }) }
     function postJson(path, obj) {
       return api(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(obj || {}) })
     }
@@ -246,7 +249,7 @@ window.__ModuleLoader__.load({
         }
         S.stopBtnArmed = false
         stopBtn.textContent = '⏹ 关浏览器'
-        api('/bl/close-browser', { method: 'POST' }).then(pollState).catch(function () {})
+        api('/bl/close-browser', { method: 'POST' }).then(function () { pollState() })
       })
       p.querySelector('#bl-fps').addEventListener('change', function () {
         fetch('/bl/settings.json', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ fps: Number(this.value) }) })
@@ -260,7 +263,7 @@ window.__ModuleLoader__.load({
         var b = ev.target.closest ? ev.target.closest('.bl-tab') : null
         if (!b) return
         var idx = Number(b.getAttribute('data-i'))
-        postJson('/bl/tabs', { action: 'select', index: idx }).then(function (r) { return r && r.ok ? r.json() : null }).then(function (st) {
+        postJson('/bl/tabs', { action: 'select', index: idx }).then(function (st) {
           if (st && st.tabs) {
             els.tabs.querySelectorAll('.bl-tab').forEach(function (n) { n.classList.toggle('sel', Number(n.getAttribute('data-i')) === idx) })
           }
@@ -461,7 +464,7 @@ window.__ModuleLoader__.load({
     // ---------------------------------------------------------------- state 轮询
 
     function pollState() {
-      api('/bl/state').then(function (r) { return r && r.ok ? r.json() : null }).then(function (st) {
+      api('/bl/state').then(function (st) {
         if (!st) return
         S.state = st
         // agent 冷启动浏览器 → 自动弹出（用户主动收走后不再自动打扰）
@@ -843,11 +846,8 @@ window.__ModuleLoader__.load({
     }
 
     function fetchSettings() {
-      // api() 给的是 Response 不是 JSON —— v0.4.0 这里漏了 .json()，j.liveView 恒为
-      // undefined，于是盘上存着 standalone、页面里 S.liveView 仍是 false：地球钮又
-      // 弹回内嵌面板。v0.4.1 修回（顺带 no-store，宿主本就发 no-store，双保险）。
+      // api() 现在直接给 JSON（v0.16.x 收敛）；no-store 双保险，宿主本就发 no-store。
       return api('/bl/settings.json', { cache: 'no-store' })
-        .then(function (r) { return r && r.ok ? r.json() : null })
         .then(function (j) {
           if (j && typeof j === 'object') {
             S.liveView = j.liveView === 'standalone'
@@ -965,13 +965,11 @@ window.__ModuleLoader__.load({
       var br = bs[0], setBr = bs[1]     // /bl/bridge 状态（P0 用户浏览器桥）
 
       function loadBridge() {
-        api('/bl/bridge', { cache: 'no-store' }).then(function (r) { return r && r.ok ? r.json() : null }).then(function (j) { if (j) setBr(j) })
+        api('/bl/bridge', { cache: 'no-store' }).then(function (j) { if (j) setBr(j) })
       }
 
       function loadCfg() {
-        // 同上：Response 要先 .json()，否则 cfg 是个 Response 对象、cfg.liveView 恒
-        // undefined，设置页每次重进都高亮「内嵌面板」。
-        api('/bl/settings.json', { cache: 'no-store' }).then(function (r) { return r && r.ok ? r.json() : null }).then(function (j) {
+        api('/bl/settings.json', { cache: 'no-store' }).then(function (j) {
           if (!j || typeof j !== 'object') return
           setCfg(j)
           S.liveView = j.liveView === 'standalone'
@@ -986,14 +984,13 @@ window.__ModuleLoader__.load({
         syncFabYield()
         foldPanelToStandalone()   // 面板摊着就收进独立页，别盖住设置内容（v0.4.3）
         var t
-        var tick = function () { api('/bl/ping').then(function (r) { return r && r.ok ? r.json() : null }).then(function (j) { if (j) setState(j) }) }
+        var tick = function () { api('/bl/ping').then(function (j) { if (j) setState(j) }) }
         tick(); loadCfg()
         t = setInterval(tick, 4000)
         return function () { clearInterval(t); S.settingsUi--; syncFabYield(); unfoldPanelIfNeeded() }
       }, [])
       function put(patch, msg) {
-        fetch('/bl/settings.json', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(patch) })
-          .then(function (r) { return r.json() })
+        api('/bl/settings.json', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(patch) })
           .then(function (j) {
             if (j && j.settings) {
               setCfg(j.settings)
@@ -1140,7 +1137,6 @@ window.__ModuleLoader__.load({
                   className: 'bl-btn', style: { height: 24, padding: '0 9px' },
                   onClick: function () {
                     api('/bl/settings.json', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userBridge: true }) })
-                      .then(function (r) { return r && r.ok ? r.json() : null })
                       .then(function (j) {
                         if (j && j.ok) { setNote('桥已启用，token 出来了 —— 按下面步骤装扩展'); loadBridge(); setTimeout(function () { setNote('') }, 4000) }
                         else setNote('启用失败：' + ((j && j.error) || '看 DSH 日志'))
@@ -1192,7 +1188,7 @@ window.__ModuleLoader__.load({
             var stacked2 = stk[0], setStacked2 = stk[1]
             React.useEffect(function () {
               var tick = function () {
-                api('/bl/ping').then(function (r) { return r && r.ok ? r.json() : null }).then(function (j) { setAlive2(!!(j && j.alive)) }).catch(function () {})
+                api('/bl/ping').then(function (j) { setAlive2(!!(j && j.alive)) }).catch(function () {})
                 setStacked2(S.stacked || stackedPossible())
               }
               tick()

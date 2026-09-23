@@ -45,8 +45,9 @@ import { BridgeServer, BRIDGE_FILE, DEFAULT_BRIDGE_PORT } from './bridge.js'
 import { createAudit, trim as auditTrim, redactAuditArgs } from './audit.js'
 // 页面内注入函数（用 fn.toString() 注入，所以必须是普通函数、不能引用模块作用域的东西）
 import {
-  READ_FN, SCRAPE_FN, SEARCH_FN, CHALLENGE_FN, SNAPSHOT_FN, ACTIONABLE_FN, READBACK_FN, FOCUS_SELECTOR_FN,
+  READ_FN, SCRAPE_FN, SEARCH_FN, CHALLENGE_FN, SNAPSHOT_FN, ACTIONABLE_FN, READBACK_FN,
 } from './page-read.js'
+import { VIEW_PAGE } from './view-page.js'
 
 export const name = 'dsh-browser-live'
 export const inject = ['tools', 'webServer']
@@ -962,7 +963,7 @@ async function applyPercentWindowSize() {
   if (!/%/.test(String(settings.windowSize || ''))) return
   const tab = await selectedTab(s).catch(() => null)
   if (!tab) return
-  const avail = await evaluate(tab, '({w:screen.availWidth,h:screen.availHeight})').catch(() => null)
+  const avail = await pageScript(tab, '({w:screen.availWidth,h:screen.availHeight})').catch(() => null)
   const px = resolveWindowSize(settings.windowSize, avail)
   if (!px) return
   const [w, h] = px.split(',').map(Number)
@@ -1416,6 +1417,28 @@ async function evaluate(tab, expression, awaitIt = false) {
   return r.result?.value
 }
 
+// ── 固定脚本分发（evaluate 收窄；README「已知缺口」的待办，2026-09 落地）──────────
+// 问题：`Runtime.evaluate` 在扩展白名单里（snapshot/text 都靠它），于是 agent 经 host
+// 下发的**任意表达式**都能进你的浏览器 —— 「允许操作」关着也拦不住"用 JS 代打"。
+// 做法：所有要注入页面的表达式统一走 pageScript()；用户浏览器档下改发
+// `BL.evaluate {expression}`，扩展只执行**登记表哈希命中**的源，其余拒绝。
+// 登记表由扩展侧维护（autoTrustScripts 默认开：host 固定脚本首见即登记；关掉则每条
+// 都要在弹窗「脚本登记表」人工批准）。插件自带实例档不变 —— 那条通道本来就是全权限。
+// 边界照实说：browser_eval 现编表达式同样过这条闸 —— 没被别的工具登记过的会被扩展拒掉
+// （报错原样透传，提示改用 read/text/scrape 或切回自带实例）；页面自己的 JS 仍可点按钮，
+// 那由逐站点授权 + Chrome 调试横幅兜着。
+
+/** 求值一条页面表达式；用户浏览器档走 BL.evaluate（扩展按登记表过滤），其余走原生。 */
+async function pageScript(tab, expression, awaitIt = false) {
+  const s = browser.session
+  if (s && s.backend === 'user' && s.cdp) {
+    const r = await s.cdp.send('BL.evaluate', { expression }, tab.sessionId)
+    if (r && r.exceptionDetails) throw new Error('页面内脚本异常：' + ((r.exceptionDetails.exception && r.exceptionDetails.exception.description) || r.exceptionDetails.text || 'unknown').split('\n')[0].slice(0, 300))
+    return r && r.result ? r.result.value : undefined
+  }
+  return evaluate(tab, expression, awaitIt)
+}
+
 function noteAction(label) {
   browser.actionLog.push({ t: Date.now(), label })
   if (browser.actionLog.length > 50) browser.actionLog.shift()
@@ -1449,7 +1472,11 @@ const REF_CENTER_FN = `function(id){var e=window.__BL_REFS&&window.__BL_REFS[id]
 
 const SELECTOR_CENTER_FN = `function(css){var e=document.querySelector(css);if(!e)return {error:"选择器没有命中元素"};e.scrollIntoView({block:"center",inline:"center"});var r=e.getBoundingClientRect();return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};}`
 
-const FOCUS_FN = `function(id){var e=window.__BL_REFS&&window.__BL_REFS[id];if(!e||!e.isConnected)return {error:"ref 失效，请重新 browser_snapshot"};e.scrollIntoView({block:"center",inline:"center"});e.focus();var tag=e.tagName.toLowerCase();if((tag==="input"||tag==="textarea")&&typeof e.select==="function"&&e.type!=="password"&&e.type!=="file"&&!e.readOnly)e.select();return {ok:true,tag:tag};}`
+// 聚焦（browser_type 用）。ref 与 selector 只差解析一步：'\u0000'+ref 查 __BL_REFS，否则 querySelector。
+// （selector 常以 '#id' 开头，所以 ref 一律带 \u0000 前缀传递，避免两种 key 撞车。）
+// 写成页面内函数而不是在 index.js 里拼字符串：手拼括号对不上时，报错是页面里的 SyntaxError，
+// 排查成本远高于让 node --check 在这儿兜住。
+const FOCUS_FN = `function(sel){var e=sel.charAt(0)==="\\u0000"?window.__BL_REFS&&window.__BL_REFS[sel.slice(1)]:document.querySelector(sel);if(!e||!e.isConnected)return {error:"元素不在了（ref 失效或 selector 未命中），请重新 browser_snapshot"};e.scrollIntoView({block:"center",inline:"center"});e.focus();var tag=e.tagName.toLowerCase();if((tag==="input"||tag==="textarea")&&typeof e.select==="function"&&e.type!=="password"&&e.type!=="file"&&!e.readOnly)e.select();return {ok:true,tag:tag};}`
 
 // browser_upload 用：把"上传按钮/拖拽区/自定义 React 组件"解析成真正的 <input type=file>
 // 并打上 data-bl-up 标记（隐藏 input 也算——Meta 等后台的上传区多是 label/button 包着的隐藏 input）。
@@ -1474,7 +1501,7 @@ async function callOnPage(tab, functionDeclaration, args = []) {
   // Runtime.evaluate + IIFE 包装：函数源用模板字面量书写，参数逐个 JSON 转义，无手工括号失衡风险，
   // 也免去 callFunctionOn 的 executionContextId 要求。
   const expr = '(' + functionDeclaration + ')(' + args.map((a) => JSON.stringify(a)).join(',') + ')'
-  return evaluate(tab, expr)
+  return pageScript(tab, expr)
 }
 
 // ------------------------------------------------------------- CDP input helpers
@@ -2230,13 +2257,11 @@ function buildTools(t) {
         const probe = await callOnPage(tab, ACTIONABLE_FN, [key.kind, key.v, { needEnabled: false }])
         if (probe && probe.type) actInfo.fieldType = probe.type
       }
-      if (key && key.kind === 'ref') {
-        const f = await callOnPage(tab, FOCUS_FN, [key.v])
+      if (key) {
+        // ref 与 selector 只差解析一步，统一走 FOCUS_FN（'\u0000'+ref 查 __BL_REFS，否则 querySelector）。
+        // selector 的非法/未命中已由上面的 ACTIONABLE_FN 拦下；这里只兜"元素不在了"。
+        const f = await callOnPage(tab, FOCUS_FN, [key.kind === 'ref' ? '\u0000' + key.v : key.v])
         if (f.error) return f
-      } else if (key) {
-        // 没有 ref 时按 selector 聚焦（FOCUS_SELECTOR_FN 在 page-read.js 里，语法由 node --check 兜住）
-        const ff = await callOnPage(tab, FOCUS_SELECTOR_FN, [key.v])
-        if (ff && ff.error) return ff
       }
       const text = String(args.text ?? '')
       await typeText(tab, text, { enter: !!args.enter })
@@ -2285,7 +2310,7 @@ function buildTools(t) {
       if (!q.nodeId) return { ok: false, error: '标记丢失（页面刚好重渲染了），重试 browser_upload' }
       const setParams = { files: abs, ...(q.backendNodeId ? { backendNodeId: q.backendNodeId } : { nodeId: q.nodeId }) }
       await browser.cdp.send('DOM.setFileInputFiles', setParams, tab.sessionId)
-      await evaluate(tab, 'document.querySelectorAll("input[data-bl-up]").forEach(function(n){n.removeAttribute("data-bl-up")})').catch(() => {})
+      await pageScript(tab, 'document.querySelectorAll("input[data-bl-up]").forEach(function(n){n.removeAttribute("data-bl-up")})').catch(() => {})
       return {
         ok: true,
         via: r.via,
@@ -2320,7 +2345,7 @@ function buildTools(t) {
       if (args.ref) { const r = await callOnPage(tab, REF_CENTER_FN, [String(args.ref)]); if (r.error) return r }
       await dispatchMouse(tab, 'mouseWheel', 400, 400, { deltaX: d === 'left' ? -amount : d === 'right' ? amount : 0, deltaY: d === 'up' ? -amount : d === 'down' ? amount : 0, button: 'none' })
       await sleep(120)
-      const pos = await evaluate(tab, '({y:Math.round(window.scrollY||0),x:Math.round(window.scrollX||0),doc:document.documentElement.scrollHeight})')
+      const pos = await pageScript(tab, '({y:Math.round(window.scrollY||0),x:Math.round(window.scrollX||0),doc:document.documentElement.scrollHeight})')
       return { ok: true, scrolled: pos }
     },
   }))
@@ -2342,11 +2367,11 @@ function buildTools(t) {
       const cond = !!(args.textContains || args.selectorPresent || args.urlMatches)
       while (true) {
         if (!cond) return { ok: true, waited: 'time' }
-        const st = await evaluate(tab, '(function(){return {t:(document.body&&document.body.innerText||"").slice(0,20000),s:0,u:location.href}})()')
+        const st = await pageScript(tab, '(function(){return {t:(document.body&&document.body.innerText||"").slice(0,20000),s:0,u:location.href}})()')
         const hit = (!args.textContains || String(st.t).includes(args.textContains))
-          && (!args.selectorPresent || !!(await evaluate(tab, '(!!document.querySelector(' + JSON.stringify(args.selectorPresent) + '))')))
+          && (!args.selectorPresent || !!(await pageScript(tab, '(!!document.querySelector(' + JSON.stringify(args.selectorPresent) + '))')))
           && (!args.urlMatches || String(st.u).includes(args.urlMatches))
-        if (hit) return { ok: true, url: st.u, title: await evaluate(tab, 'document.title') }
+        if (hit) return { ok: true, url: st.u, title: await pageScript(tab, 'document.title') }
         if (Date.now() > deadline) return { ok: false, timeout: true, url: st.u }
         if (exec.signal?.aborted) return { ok: false, aborted: true }
         await sleep(500)
@@ -2356,11 +2381,11 @@ function buildTools(t) {
 
   tools.push(t({
     name: 'browser_eval',
-    description: '在页面上下文执行 JS 表达式（IIFE，如 "(()=>{...})()"），returnByValue+awaitPromise，结果超过 24000 字符会在**序列化前**结构化截断（结果里带 truncated/truncation 说明保留了多少，不是把 JSON 切断）。适合取正文片段、读 location、操作 window 上插件自身登记的辅助对象；常规交互优先用 snapshot/click/type。',
+    description: '在页面上下文执行 JS 表达式（IIFE，如 "(()=>{...})()"），returnByValue+awaitPromise，结果超过 24000 字符会在**序列化前**结构化截断（结果里带 truncated/truncation 说明保留了多少，不是把 JSON 切断）。适合取正文片段、读 location、操作 window 上插件自身登记的辅助对象；常规交互优先用 snapshot/click/type。注意：「你的浏览器」档（use:"edge"/"chrome"）已收窄为固定脚本下发 —— 现编的任意表达式会被扩展登记表拒绝（改用 read/text/scrape/snapshot，或 {use:"plugin"} 切回自带实例）。',
     parameters: { expression: { type: 'string', required: true, description: '单个 JS 表达式' }, awaitPromise: { type: 'boolean', description: 'true=await（默认 false）' } },
     async execute(args) {
       const tab = await selectedTab()
-      const v = await evaluate(tab, String(args.expression || ''), !!args.awaitPromise)
+      const v = await pageScript(tab, String(args.expression || ''), !!args.awaitPromise)
       return { value: v }
     },
   }))
@@ -2378,9 +2403,9 @@ function buildTools(t) {
       const sel = args.selector || 'body'
       const off = Math.max(0, args.offset || 0)
       const lim = clamp(args.limit || 8000, 200, MAX_TEXT_CHARS)
-      const r = await evaluate(tab, '(function(){var e=document.querySelector(' + JSON.stringify(sel) + ');var t=e?(e.innerText||""):null;return {found:t!==null,len:t?t.length:0,text:t?t.slice(' + off + ',' + off + '+' + lim + '):""}})()')
+      const r = await pageScript(tab, '(function(){var e=document.querySelector(' + JSON.stringify(sel) + ');var t=e?(e.innerText||""):null;return {found:t!==null,len:t?t.length:0,text:t?t.slice(' + off + ',' + off + '+' + lim + '):""}})()')
       if (!r.found) return { ok: false, error: 'selector 未命中: ' + sel }
-      return { url: await evaluate(tab, 'location.href'), length: r.len, offset: off, text: r.text, more: r.len > off + r.text.length }
+      return { url: await pageScript(tab, 'location.href'), length: r.len, offset: off, text: r.text, more: r.len > off + r.text.length }
     },
   }))
 
@@ -2518,7 +2543,7 @@ function buildTools(t) {
           const t0 = Date.now()
           let hits = 0
           while (Date.now() - t0 < 8000) {
-            hits = await evaluate(tab, 'document.querySelectorAll(' + JSON.stringify(eng.spec.item) + ').length').catch(() => 0)
+            hits = await pageScript(tab, 'document.querySelectorAll(' + JSON.stringify(eng.spec.item) + ').length').catch(() => 0)
             if (hits > 0) break
             if (Date.now() > deadline) break
             await sleep(300)
@@ -2656,9 +2681,20 @@ function buildTools(t) {
 
   tools.push(t({
     name: 'browser_downloads',
-    description: '列出浏览器下载（$DSH_HOME/dsh-browser-live/downloads/）：文件名/大小/状态。用户可在观察窗里直接点下载文件。',
+    description: '列出浏览器下载。插件自带实例档：$DSH_HOME/dsh-browser-live/downloads/（文件名/大小/状态，用户可在观察窗里直接点下载文件）。你的浏览器档（use:"edge"/"chrome"）：走扩展的 chrome.downloads 列该浏览器的下载记录（只回文件名/大小/状态，本地路径不外泄；需扩展弹窗「允许操作」开着）。',
     parameters: {},
     async execute() {
+      const s = browser.session
+      // 用户浏览器档：下载记录在**那台浏览器**里（chrome.downloads），不在插件目录。
+      // `BL.downloads` 不是 CDP 方法，是扩展 handleCommand 的单独分支（v0.3.4）。
+      if (s && s.backend === 'user' && s.cdp) {
+        try {
+          const r = await s.cdp.send('BL.downloads', {})
+          return { backend: 'user', browser: kindLabel(s.kind), dir: r?.dir, files: (r?.files || []).slice(-40) }
+        } catch (e) {
+          return { backend: 'user', browser: kindLabel(s.kind), error: String(e.message || e) + '（扩展需 v0.3.4+ 且「允许操作」开着）' }
+        }
+      }
       let files = []
       try { files = readdirSync(DOWNLOADS_DIR()).filter((f) => !f.endsWith('.crdownload')) } catch {}
       const onDisk = files.map((f) => { try { return { file: f, bytes: statSync(path.join(DOWNLOADS_DIR(), f)).size, mtime: statSync(path.join(DOWNLOADS_DIR(), f)).mtimeMs } } catch { return { file: f } } })
@@ -2676,7 +2712,7 @@ function buildTools(t) {
     } catch (e) { return { ok: false, error: '导航失败: ' + e.message } }
     for (let i = 0; i < 60; i++) {
       await sleep(250)
-      const rs = await evaluate(tab, 'document.readyState').catch(() => null)
+      const rs = await pageScript(tab, 'document.readyState').catch(() => null)
       if (rs === 'complete') break
     }
     await sleep(250)
@@ -3000,127 +3036,7 @@ export async function apply(ctx, config) {
     console.warn('[dsh-browser-live] 无法注入 connection 服务（不影响浏览器功能）:', e?.message)
   }
 
-  // 独立网页版观察窗（liveView=standalone 或面板/地球钮的 ⧉ 按钮打开）：
-  // 同一套 /bl/* 接口的全屏页面，可拖到副屏、F11/⛶ 全屏，适合"看着 agent 干活"。
-  const VIEW_PAGE = [
-    '<!doctype html><html lang="zh"><head><meta charset="utf-8">',
-    '<meta name="viewport" content="width=device-width,initial-scale=1">',
-    '<title>浏览器观察窗</title><style>',
-    ':root{color-scheme:dark}',
-    'html,body{height:100%;margin:0}',
-    'body{background:#0d1117;color:#dfe6ef;font:13px/1.5 system-ui,"Segoe UI",sans-serif;display:flex;flex-direction:column}',
-    '#hd{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid #222a35;flex:none}',
-    '#ttl{font-weight:600;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
-    '#url{color:#8b98a9;max-width:38%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px}',
-    '#who{display:none;font-size:11px;padding:1px 7px;border-radius:99px;background:rgba(198,40,40,.18);border:1px solid rgba(198,40,40,.5);color:#ff9b93;flex:none}',
-    '.dot{width:9px;height:9px;border-radius:50%;corner-shape:round;background:#b9bfc9;flex:none}',
-    '.dot.on{background:#3fb96f;box-shadow:0 0 7px rgba(63,185,111,.9)}',
-    // v0.15.0：黄灯 = 浏览器在跑但画面断流（在自动重连）。绿点只代表"画面真的在更新"
-    //（独立页原来和面板犯同一个错：收到过帧就一直是绿的，轮询还会按 /bl/state 把它重新点亮）
-    '.dot.warn{background:#e0a63c;box-shadow:0 0 7px rgba(224,166,60,.85)}',
-    '#stat{color:#e0a63c;font-size:12px;flex:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:34%}',
-    '#stale{position:absolute;left:50%;top:12px;transform:translateX(-50%);background:rgba(120,78,10,.86);color:#ffe9c2;border-radius:8px;padding:4px 12px;font-size:12px;pointer-events:none;white-space:nowrap}',
-    '#tabs{display:none;gap:6px;padding:6px 10px;border-bottom:1px solid #222a35;overflow-x:auto;flex:none}',
-    '.tab{flex:none;max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border:1px solid #2b3542;background:#161c24;border-radius:7px;padding:3px 9px;cursor:pointer;color:inherit;font-size:12px}',
-    '.tab.sel{border-color:#5b8def;background:rgba(91,141,239,.16)}',
-    '#stage{position:relative;flex:1;min-height:0;background:#101418;display:flex;align-items:flex-start;justify-content:center;overflow:hidden;line-height:0}',
-    '#img{max-width:100%;max-height:100%;display:block;user-select:none;-webkit-user-drag:none}',
-    '#empty{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#8b98a9;line-height:1.7;text-align:center;padding:24px}',
-    '#act{position:absolute;left:12px;bottom:12px;right:12px;background:rgba(10,14,20,.75);border-radius:8px;padding:4px 10px;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none;opacity:0;transition:opacity .25s}',
-    '#act.show{opacity:1}',
-    '#ft{display:flex;align-items:center;gap:10px;padding:8px 12px;border-top:1px solid #222a35;flex-wrap:wrap;flex:none}',
-    'button{border:1px solid #2b3542;background:#161c24;color:inherit;border-radius:7px;height:26px;padding:0 10px;cursor:pointer;font-size:12px}',
-    'button:hover{border-color:#3b4757}',
-    'button.on{background:rgba(91,141,239,.18);border-color:#5b8def}',
-    'button.danger{color:#ff7b72;border-color:rgba(255,123,114,.4)}',
-    'select{border:1px solid #2b3542;background:#161c24;color:inherit;border-radius:6px;height:26px;font-size:12px}',
-    'label{color:#8b98a9;display:inline-flex;align-items:center;gap:5px}',
-    '#dl{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap}',
-    '#dl a{color:#7aa7e8;text-decoration:none;border:1px solid rgba(91,141,239,.4);border-radius:6px;padding:1px 8px;max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px}',
-    '#key{position:absolute;left:-9999px;width:1px;height:1px;opacity:0}',
-    '#fsmsg{display:none;position:fixed;left:50%;bottom:52px;transform:translateX(-50%);max-width:min(680px,92vw);background:rgba(10,14,20,.92);border:1px solid rgba(255,123,114,.45);color:#ffd8d4;border-radius:8px;padding:7px 12px;font-size:12px;line-height:1.5;z-index:9}',
-    '</style></head><body>',
-    '<div id="hd"><span class="dot" id="dot"></span><span id="who"></span><span id="ttl">浏览器观察窗</span><span id="url"></span><span id="stat"></span>',
-    '<button id="rc" title="重连画面">⟳ 重连</button><button id="fs" title="全屏（也可以直接按 F11）">⛶ 全屏</button></div>',
-    '<div id="tabs"></div>',
-    '<div id="stage"><img id="img" alt="" draggable="false">',
-    '<div id="stale" hidden></div>',
-    '<div id="empty">等待 agent 打开浏览器…<br>在 DSH 里调用任意 browser_* 工具后，这里会实时显示画面</div>',
-    '<div id="act"></div><textarea id="key" spellcheck="false" autocomplete="off"></textarea></div>',
-    '<div id="fsmsg"></div>',
-    '<div id="ft"><button id="take">⌨ 接管:开</button>',
-    '<label>FPS <select id="fps"><option>1</option><option selected>2</option><option>4</option><option>8</option></select></label>',
-    '<label>画质 <select id="q"><option value="40">省流</option><option value="60" selected>默认</option><option value="80">高清</option></select></label>',
-    '<button id="stop" class="danger">⏹ 关浏览器</button><span id="dl"></span></div>',
-    '<script>',
-    '(function(){',
-    'var $=function(i){return document.getElementById(i)};',
-    'var img=$("img"),dot=$("dot"),ttl=$("ttl"),url=$("url"),tabs=$("tabs"),act=$("act"),empty=$("empty"),key=$("key"),dl=$("dl"),who=$("who"),stat=$("stat"),stale=$("stale");',
-    'var vw=1280,takeOn=true,es=null,lastClick=0,stopArmed=false,st=null;',
-    'function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;"}[c]})}',
-    'function trim(u){return String(u||"").replace(/^https?:\\/\\//,"").slice(0,80)}',
-    'function post(p,o){return fetch(p,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(o||{})}).catch(function(){})}',
-    'function api(p){return fetch(p).then(function(r){return r.ok?r.json():null}).catch(function(){return null})}',
-    'function xy(ev){var r=img.getBoundingClientRect();if(!r.width)return null;var f=vw/r.width;return {x:Math.max(0,Math.round((ev.clientX-r.left)*f)),y:Math.max(0,Math.round((ev.clientY-r.top)*f))}}',
-    'function focusKey(){try{key.focus({preventScroll:true})}catch(e){}}',
-    'img.addEventListener("mousedown",function(ev){if(!takeOn||ev.button>2)return;ev.preventDefault();focusKey();var p=xy(ev);if(!p)return;var now=Date.now();var dbl=now-lastClick<350&&ev.button===0;lastClick=now;post("/bl/input",{kind:ev.button===2?"rclick":dbl?"dblclick":"click",x:p.x,y:p.y})});',
-    'img.addEventListener("contextmenu",function(ev){if(takeOn)ev.preventDefault()});',
-    'var mv=0;img.addEventListener("mousemove",function(ev){if(!takeOn)return;var now=Date.now();if(now-mv<90)return;mv=now;var p=xy(ev);if(p)post("/bl/input",{kind:"move",x:p.x,y:p.y})});',
-    '$("stage").addEventListener("wheel",function(ev){if(!takeOn)return;ev.preventDefault();var p=xy(ev);if(!p)return;post("/bl/input",{kind:"wheel",x:p.x,y:p.y,dx:Math.round(ev.deltaX),dy:Math.round(ev.deltaY)})},{passive:false});',
-    'var NAMED=["Enter","Tab","Escape","Backspace","Delete","ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Home","End","PageUp","PageDown","F1","F2","F3","F4","F5","F6","F7","F8","F9","F10","F11","F12"," ","Insert"];',
-    'key.addEventListener("keydown",function(ev){if(!takeOn)return;var c=[];if(ev.ctrlKey)c.push("ctrl");if(ev.altKey)c.push("alt");if(ev.metaKey)c.push("meta");if(ev.shiftKey&&(c.length||ev.key.indexOf("Arrow")===0||["Tab","Enter","Backspace","Delete"].indexOf(ev.key)>=0))c.push("shift");if(NAMED.indexOf(ev.key)>=0||c.length){ev.preventDefault();post("/bl/input",{kind:"key",keys:c.concat([ev.key===" "?"Space":ev.key]).join("+")})}});',
-    'key.addEventListener("beforeinput",function(ev){if(!takeOn)return;if(ev.inputType==="insertText"&&ev.data){ev.preventDefault();post("/bl/input",{kind:"text",text:ev.data})}});',
-    'key.addEventListener("compositionend",function(ev){if(takeOn&&ev.data)post("/bl/input",{kind:"text",text:ev.data})});',
-    'key.addEventListener("paste",function(ev){var t=(ev.clipboardData||window.clipboardData).getData("text");if(t){ev.preventDefault();post("/bl/input",{kind:"text",text:t})}});',
-    '$("take").addEventListener("click",function(){takeOn=!takeOn;this.textContent=takeOn?"⌨ 接管:开":"⌨ 接管:关";this.classList.toggle("on",takeOn)});',
-    '$("take").classList.add("on");',
-    '$("fps").addEventListener("change",function(){fetch("/bl/settings.json",{method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify({fps:Number(this.value)})})});',
-    '$("q").addEventListener("change",function(){fetch("/bl/settings.json",{method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify({quality:Number(this.value)})})});',
-    '$("stop").addEventListener("click",function(){var b=this;if(!stopArmed){stopArmed=true;b.textContent="再点一次确认关闭";setTimeout(function(){stopArmed=false;b.textContent="⏹ 关浏览器"},3000);return}stopArmed=false;b.textContent="⏹ 关浏览器";post("/bl/close-browser",{}).then(function(){setTimeout(poll,300)})});',
-    '$("rc").addEventListener("click",function(){open()});',
-    // 全屏：以前是一个裸 requestFullscreen()，被拒时静默 —— 用户看到的就是"点了没反应"。
-    // 现在把失败原因说出来（被 iframe 的 permission policy 拦 / 浏览器不允许 / 元素失效），
-    // 并给出一定能用的替代（F11）。失败不抛出去，免得把整个页面脚本带崩。
-    'function fsMsg(t){var m=$("fsmsg");if(!m)return;m.textContent=t;m.style.display="block";clearTimeout(fsMsg.t);fsMsg.t=setTimeout(function(){m.style.display="none"},7000)}',
-    '$("fs").addEventListener("click",function(){',
-    '  try{',
-    '    if(document.fullscreenElement||document.webkitFullscreenElement){',
-    '      var ex=document.exitFullscreen||document.webkitExitFullscreen;',
-    '      if(ex){var r=ex.call(document);if(r&&r.catch)r.catch(function(e){fsMsg("退出全屏失败："+e.message)})}',
-    '      return;',
-    '    }',
-    '    var root=document.documentElement;',
-    '    var req=root.requestFullscreen||root.webkitRequestFullscreen||root.mozRequestFullScreen||root.msRequestFullscreen;',
-    '    if(!req){fsMsg("这个浏览器不支持脚本全屏（requestFullscreen 不存在）—— 请直接按 F11") ;return}',
-    '    var p=req.call(root,{navigationUI:"hide"});',
-    '    if(p&&p.catch)p.catch(function(e){',
-    '      var why=(location!==window.top)?"本页被嵌在 iframe 里，父页面没给 allow=fullscreen 权限":"浏览器拒绝了这次请求";',
-    '      fsMsg("全屏被拒："+why+"（"+e.name+": "+e.message+"）。替代：按 F11；或点面板标题栏的 ⧉ 在独立窗口里看")',
-    '    })',
-    '  }catch(e){fsMsg("全屏出错："+e.message+"（替代：按 F11）")}',
-    '});',
-    'var lastFrameAt=0,streamErr=false;',
-    // 健康判定（与内嵌面板 v0.13.0 同一套口径）：绿=画面在更新；黄=在跑但断流；灰=浏览器没跑。
-    // 独立页没有"收起"形态，所以没有暂停态。阈值 3.5s = 最慢档 1 FPS 留三次余量。
-    'function render(){var alive=!!(st&&st.alive);var fresh=lastFrameAt>0&&(Date.now()-lastFrameAt)<3500;',
-    'dot.classList.toggle("on",alive&&fresh);dot.classList.toggle("warn",alive&&!fresh&&(!!es||lastFrameAt>0));',
-    'stat.textContent=(alive&&!fresh&&(!!es||lastFrameAt>0))?(lastFrameAt>0?"正在重连":"还没收到画面"):"";',
-    'var showStale=alive&&!fresh&&lastFrameAt>0;stale.hidden=!showStale;',
-    'if(showStale)stale.textContent="⏸ 画面已停 · 最后更新于 "+Math.max(0,Math.round((Date.now()-lastFrameAt)/1000))+" 秒前"}',
-    'setInterval(render,1000);',
-    'function open(){if(es){try{es.close()}catch(e){}}try{es=new EventSource("/bl/stream");es.onopen=function(){streamErr=false;render()};es.addEventListener("frame",function(ev){var d;try{d=JSON.parse(ev.data)}catch(e){return}vw=d.vw||vw;img.src="data:image/jpeg;base64,"+d.img;empty.style.display="none";lastFrameAt=Date.now();streamErr=false;var t=String(d.title||"浏览器观察窗").slice(0,90);ttl.textContent=t;url.textContent=trim(d.url);render()});es.addEventListener("offline",function(){streamErr=false;render()});es.onerror=function(){streamErr=true;render()}}catch(e){}}',
-    'function poll(){api("/bl/state").then(function(s){if(!s)return;st=s;',
-    'if(st.backend==="user"){who.style.display="inline-block";who.textContent=((st.bridge&&st.bridge.allowInput)?"🔴 正在操作你的":"🔴 正在读取你的")+(st.browserLabel||"日常浏览器")+((st.bridge&&st.bridge.allowInput)?"（可点击/打字）":"")}else{who.style.display="none";who.textContent=""}',
-    'if(!st.alive){empty.style.display="flex";img.removeAttribute("src");ttl.textContent="浏览器观察窗";url.textContent=""}',
-    'var ts=st.tabs||[];tabs.style.display=ts.length>1?"flex":"none";tabs.innerHTML=ts.map(function(t){return \x27<button class="tab\x27+(t.selected?" sel":"")+\x27" data-i="\x27+t.i+\x27">\x27+esc(t.title||trim(t.url)||"(空白页)")+\x27</button>\x27}).join("");',
-    'var done=(st.downloads||[]).filter(function(d){return d.state==="done"}).slice(-3);dl.innerHTML=done.map(function(d){return \x27<a href="/bl/download?file=\x27+encodeURIComponent(d.file)+\x27" title="取回下载文件">⬇ \x27+esc(d.file)+\x27</a>\x27}).join("");',
-    'var la=st.lastAction||[];var last=la[la.length-1];if(last){act.textContent="🤖 "+last.label;act.classList.add("show")}',
-    'if(st.panelWanted)post("/bl/ack",{})})}',
-    'tabs.addEventListener("click",function(ev){var b=ev.target.closest?ev.target.closest(".tab"):null;if(!b)return;post("/bl/tabs",{action:"select",index:Number(b.getAttribute("data-i"))}).then(poll)});',
-    'open();poll();setInterval(poll,2500);',
-    '})();',
-    '</script></body></html>',
-  ].join('\n')
+  // 独立网页版观察页 VIEW_PAGE 已抽到 ./view-page.js
 
   if (webServer && typeof webServer.register === 'function') {
     offs.push(ctx.effect(() => webServer.register({
