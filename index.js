@@ -3230,6 +3230,21 @@ export async function apply(ctx, config) {
     console.warn('[dsh-browser-live] webServer 不可用：观察窗面板不会工作，工具仍可用（headless 场景）')
   }
 
+  // 官方 provider 槽（独占单槽，官方包 `@deepseek-ai/dsh-browser-use` 提供 ctx.browserUse）：
+  // 本插件就是"浏览器工具的提供方"（21 个 browser_* 由 ctx.tools 注册），服务在就登记一下名字，
+  // 让官方那侧知道这批工具归谁。服务不在（本机 profile 里没装这个包）⇒ 这段什么都不做；
+  // 槽已被别的 provider 占用 ⇒ register 会抛/被拒，记一行日志就放过，绝不影响本插件自己的工具。
+  // ponytail: 本机装不到那个包，所以这条路径**无法在本机验证**；它的唯一保证是"不改变现有行为"。
+  try {
+    const browserUse = ctx.get && ctx.get('browserUse')
+    if (browserUse && typeof browserUse.register === 'function') {
+      offs.push(ctx.effect(() => browserUse.register('dsh-browser-live')))
+      console.log('[dsh-browser-live] 已在官方 browserUse 槽登记：dsh-browser-live')
+    }
+  } catch (e) {
+    console.warn('[dsh-browser-live] browserUse 槽登记失败（多半已被别的 provider 占用，不影响本插件）：' + String(e?.message || e))
+  }
+
   process.on('exit', () => { try { if (browser.proc) browser.proc.kill() } catch {} try { browser.cdp?.close() } catch {} })
 
   // 注册"调用方案"技能（skills/browser-automation/SKILL.md）：agent 的技能目录里只常驻

@@ -36,15 +36,17 @@ window.__ModuleLoader__.load({
     // 于是所有 `border-radius:50%` 的真圆都会被画成圆角方块（按钮 hover 底衬尤其明显）。
     // 宿主自己的圆形控件都写 `corner-shape:round` 豁免，这里照做；旧内核会自动忽略该属性。
     var CSS = [
-      '.bl-fab{width:22px;height:22px;border-radius:50%;corner-shape:round;border:none;background:transparent;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;position:relative;font-size:15px;line-height:1;padding:0;flex:none;transition:opacity .3s ease,filter .3s ease}',
+      '.bl-fab{width:22px;height:22px;border-radius:50%;corner-shape:round;border:none;background:transparent;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;position:relative;font-size:15px;line-height:1;padding:0;flex:none;transition:opacity .25s ease}',
       '.bl-fab:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.16))}',
       '.bl-fab-dot{position:absolute;right:0;top:0;width:5px;height:5px;border-radius:50%;corner-shape:round;background:#3fb96f;box-shadow:0 0 4px rgba(63,185,111,.8)}',
       '.bl-fab-dot.bl-off{background:#b9bfc9;box-shadow:none}',
       '.bl-fab-stacked{position:fixed;z-index:2147483450}',
-      // 退路样式：量不到遮罩层级时，浮球仍留在顶层，但自己糊成一层磨砂影（小玻璃板 +
-      // backdrop-filter 把它身后的内容糊掉），看着像沉在下面，而不是硬邦邦压在上面。
-      '.bl-fab-ghost{opacity:.3;filter:blur(2px) saturate(.7);pointer-events:none}',
-      '.bl-fab-ghost::before{content:"";position:absolute;inset:-8px -8px -6px;border-radius:14px;background:rgba(20,18,26,.3);backdrop-filter:blur(7px) saturate(.9);box-shadow:inset 0 0 0 1px rgba(255,255,255,.08)}',
+      // 2026-10-02：这里原有一版"就地磨砂"退路（filter:blur(2px) + ::before 的 backdrop-filter）。
+      // 用户反馈"UI 分辨率变低" —— 那正是它：filter/backdrop-filter 会把浮球所在的合成层
+      // 重新栅格化（backdrop-filter 还会就地立一个 backdrop root），观感就是整块发糊。
+      // 而且它和需求相反："想让开"要的是躲开，不是把自己糊在人家脸上。现在改成**淡出**：
+      // 既不遮挡、也不糊任何东西，弹层一走立刻回来。
+      '.bl-fab-hidden{opacity:0;pointer-events:none}',
       // 兜底球的层级也走样式表（不写行内）：让位时把 style.zIndex 置空才能回到基值
       '.bl-fab-fallback{position:fixed;left:18px;bottom:18px;z-index:2147483450;box-shadow:0 6px 20px rgba(0,0,0,.22)}',
       // 面板几何全部走**视口百分比**（v0.12.0）：宽/高/宽屏宽/边距都是"屏幕的多少"，
@@ -94,6 +96,39 @@ window.__ModuleLoader__.load({
       '.bl-panel.bl-min .bl-hd{padding:6px 10px;border-bottom:0}',
       '.bl-panel.bl-min .bl-url{max-width:140px}',
       '.bl-panel.bl-min #bl-wide,.bl-panel.bl-min #bl-pop{display:none}',
+      // ---- 设置页（形状照底图工坊：标题 + 小字说明 + 每行「左标签 / 右控件」的卡，进阶项收进 details）----
+      // 官方客户端的设置分区只挂载当前选中的那一个，所以这里的顺序就是用户读到的顺序：
+      // 状态 → 形态 → 尺寸 → 折叠的进阶组 → 小字注脚。颜色一律走主题 token，换主题不用改这里。
+      '.bl-set{font-size:12px}',
+      '.bl-h{font-size:15px;font-weight:600;color:var(--dsw-alias-label-primary,#222);margin:0 0 4px}',
+      '.bl-sub{font-size:12px;color:var(--dsw-alias-label-secondary,#777);line-height:1.6;margin:0 0 12px}',
+      // 名字带 hero 而不是 status：`.bl-status` 是**面板标题行**那条黄字的状态位，
+      // 两处撞名会把面板的状态文字顶成一个带内边距的卡片（首轮就是这么翻车的）。
+      '.bl-hero{display:flex;align-items:center;gap:10px;padding:12px 14px;margin:0 0 14px;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.22));border-radius:12px;background:var(--dsw-alias-bg-layer-1,rgba(127,127,127,.05))}',
+      '.bl-hero.on{border-color:rgba(63,185,111,.45)}',
+      '.bl-hero-main{flex:1 1 auto;min-width:0}',
+      '.bl-hero-name{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary,#222);line-height:1.5}',
+      '.bl-hero-meta{font-size:11px;color:var(--dsw-alias-label-tertiary,#999);line-height:1.5;overflow-wrap:anywhere}',
+      '.bl-card{margin:0 0 10px;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.22));border-radius:12px;background:var(--dsw-alias-bg-layer-1,rgba(127,127,127,.05));overflow:hidden}',
+      '.bl-row{display:grid;grid-template-columns:minmax(96px,0.8fr) minmax(220px,1.6fr);gap:16px;align-items:center;padding:10px 14px;font-size:12px;color:var(--dsw-alias-label-secondary,#777)}',
+      '.bl-row + .bl-row{border-top:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.18))}',
+      '.bl-lab small{display:block;margin-top:2px;font-size:11px;color:var(--dsw-alias-label-tertiary,#999);line-height:1.45}',
+      '.bl-ctl{display:flex;flex-wrap:wrap;gap:6px;align-items:center;justify-self:start;color:var(--dsw-alias-label-primary,#222);min-width:0}',
+      '.bl-inp{box-sizing:border-box;flex:1 1 170px;min-width:0;font:inherit;padding:6px 9px;border-radius:8px;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.28));background:var(--dsw-alias-bg-layer-2,transparent);color:var(--dsw-alias-label-primary,#222)}',
+      '.bl-num{flex:0 0 64px}',
+      '.bl-unit{font-size:11px;color:var(--dsw-alias-label-tertiary,#999)}',
+      '.bl-set .bl-btn{height:auto;padding:5px 11px;border-radius:8px;font-size:12px;line-height:1.5}',
+      '.bl-group{margin:0 0 10px;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.22));border-radius:10px;background:var(--dsw-alias-bg-layer-1,rgba(127,127,127,.05));overflow:hidden}',
+      '.bl-group summary{padding:11px 14px;cursor:pointer;font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary,#222)}',
+      '.bl-group[open] summary{border-bottom:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.18))}',
+      '.bl-group .bl-row:first-child{border-top:0}',
+      '.bl-group .bl-row{grid-template-columns:minmax(96px,0.8fr) minmax(220px,1.6fr)}',
+      '.bl-note{font-size:11px;color:var(--dsw-alias-label-secondary,#888);line-height:1.7;border-left:2px solid var(--dsw-alias-brand-primary,#5b8def);padding-left:10px;margin:0 0 10px}',
+      '.bl-note.bl-ok{color:var(--dsw-alias-brand-primary,#5b8def);border-left-color:transparent;padding-left:0}',
+      '.bl-bridge{margin:0 14px 12px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.22));border-radius:10px;font-size:11.5px;line-height:1.7;color:var(--dsw-alias-label-secondary,#888)}',
+      '.bl-bridge.on{border-color:rgba(198,40,40,.45)}',
+      '.bl-token{margin-top:6px;word-break:break-all;display:flex;gap:6px;align-items:center;flex-wrap:wrap}',
+      '.bl-steps{margin-top:6px}',
     ].join('\n')
     function ensureStyles() {
       if (document.querySelector('style[data-bl-styles]')) return
@@ -659,64 +694,96 @@ window.__ModuleLoader__.load({
     // "左下角地图 UI 优先级太高，点开设置也能看到他"）。
     // v0.4.2 的让位不再是"消失"，而是**沉到遮罩底下**，跟壁纸宝珠同一待遇：宝珠没有任何
     // 特殊样式，它看着朦胧只是因为 DSH 那层半透明 + backdrop-filter 的遮罩盖在它上面。
-    // 我们不知道、也不需要猜遮罩的层级：在浮球中心做一次 elementsFromPoint，挑出"盖住大片
-    // 视口"的那个元素，沿它的祖先链取最大数值 z-index，浮球 z 设成它 - 1 —— 同一层磨砂会把
-    // 浮球一起糊掉，观感与宝珠完全一致。量不到（没有这样的层 / 层级全是 auto）才退回就地磨砂。
-    var YIELD_COVER = 0.25   // 只有覆盖 ≥1/4 视口的层才算"遮罩"，普通控件不算
-    function fabShouldYield() {
-      if (S.settingsUi > 0) return true
-      // 顺手覆盖其它弹层：DSH 若用 role/aria-modal 标记对话框，浮球一并让位（探不到就是
-      // 没有，多一次 querySelector，600ms 一轮，代价可忽略）。
-      try { return !!document.querySelector('[role="dialog"],[aria-modal="true"]') } catch (e) { return false }
-    }
-    function overlayZAt(fab) {
+    // 判据：**我的中心点下有谁、且它自己就是弹层（或者挂在带数值 z-index 的浮层上）** ⇒ 我让开。
+    // 为什么不是"谁盖住了大片视口"（v0.4.2 起的面积闸门）：2026-10-02 用户附图推翻了它 ——
+    // 账号菜单（设置 / 意见反馈 / 退出登录）只有 ~200×150，面积闸门看不见，地球就亮在菜单上。
+    // 也不能用"绘制顺序在我前面的才算压着我"：真弹层排在**我后面**（我 z 近上限，地球是盖着菜单画的），
+    // 用户要的恰恰是"菜单弹出来时我躲下去"。所以判据是"重叠 + 弹层身份"，不是"谁在上"。
+    //
+    // 2026-10-02 第二次修正（很关键）：**不要**用全局查询（`document.querySelector('[aria-expanded="true"]')`
+    // 之类）当信号。实测空闲状态下就有 4 个 `aria-expanded="true"`（工作区行 `hIlkoa_projectRow`、
+    // "处理失败" 折叠行…），全局查询会让地球**永久淡出**、用户再也点不到观察窗。
+    // 现在所有信号都**只认压在我中心点上的那个元素自己**：
+    //   · 它自己或祖先带了 role=menu/listbox/dialog/aria-modal ⇒ 弹层（公共 Menu 就是 role=menu）；
+    //   · 或者它挂在带数值 z 的浮层上（实测官方设置那层 z:1000、公共 Menu portal z:1100）；
+    //   · 而我身下的侧栏/会话内容两层都命中不了（链上全是 auto、也没这些 role）⇒ 平时不受影响。
+    /** 唯一还留着的全局信号：**本插件的**设置分区正在挂载 ⇒ 设置页一定开着。 */
+    function ownSettingsOpen() { return S.settingsUi > 0 }
+    /** 压在我中心点上的第一个"别人的"元素；null = 上面没别人。 */
+    function coverAt(me) {
       try {
-        var r = fab.getBoundingClientRect()
-        if (!r.width) return 0
+        var r = me.getBoundingClientRect()
+        if (!r.width) return null
         var hit = document.elementsFromPoint || document.mozElementsFromPoint
-        if (!hit) return 0
+        if (!hit) return null
         var list = hit.call(document, r.left + r.width / 2, r.top + r.height / 2) || []
-        var min = (window.innerWidth || 1280) * (window.innerHeight || 800) * YIELD_COVER
         for (var i = 0; i < list.length; i++) {
           var el = list[i]
           if (!el || el.nodeType !== 1) continue
-          if (el === fab || el.contains(fab) || fab.contains(el)) continue
-          if (el.closest && el.closest('.bl-fab')) continue     // 我们自己的另一个浮球不算遮罩
-          var b = el.getBoundingClientRect()
-          if (b.width * b.height < min) continue
-          var best = 0
-          for (var n = el; n && n.nodeType === 1; n = n.parentElement) {
-            var z = parseInt(window.getComputedStyle(n).zIndex, 10)
-            if (z > best) best = z
-          }
-          if (best > 0) return best
+          if (el === me || el.contains(me) || me.contains(el)) continue
+          if (el.closest && el.closest('.bl-fab,.bl-panel')) continue   // 我们自己的另一块浮层不算弹层
+          return el
         }
-      } catch (e) { /* 量不动就当没有遮罩，走就地磨砂 */ }
-      return 0
+      } catch (e) { /* 量不动就当没有弹层 */ }
+      return null
     }
-    function applyFabYield(fab) {
-      if (!fab || !fab.dataset) return
-      if (!fabShouldYield()) {
-        fab.style.zIndex = ''
-        fab.dataset.blYield = ''
-        if (fab.classList) fab.classList.remove('bl-fab-ghost')
+    /** 压在我头上的东西的"弹层身份"：{ z: 祖先链上的最大数值 z-index, popup: 是不是菜单/对话框 }。
+     *  ponytail: z 只认数值。真弹层基本都挂在带 z 的浮层上；万一全靠 DOM 顺序压人，还有 role 那条认它。 */
+    function overlayInfo(me) {
+      var el = coverAt(me)
+      if (!el) return { z: 0, popup: false }
+      var best = 0
+      for (var n = el; n && n.nodeType === 1; n = n.parentElement) {
+        var z = parseInt(window.getComputedStyle(n).zIndex, 10)
+        if (z > best) best = z
+      }
+      var popup = false
+      try {
+        popup = !!(el.closest && el.closest('[role="menu"],[role="listbox"],[role="dialog"],[aria-modal="true"]'))
+      } catch (e) { /* 认不出来就算了 */ }
+      return { z: best, popup: popup }
+    }
+    /**
+     * 把"我们自己画的 fixed 浮层"让到弹层后面去。
+     *
+     * 2026-10-02（官方版客户端）：原闸门是 S.settingsUi —— 那是"本插件的设置分区正在挂载"，
+     * 只在用户点进「浏览器观察窗」那一页时才 > 0。官方客户端只挂载当前选中的那一个设置分区，
+     * 于是点开设置（通用设置 / 底图工坊 / …）时闸门恒为 0，地球钮照旧亮在遮罩上；
+     * 观察窗更糟 —— 它压根没走过让位这条路，一路压在设置页上。
+     *
+     * 两条路：
+     * ① 量得到数值 z → **沉到它下面**（z-1），朦胧感由那层自己给，我们自己不加任何样式；
+     * ② 认得出是弹层却量不到 z（全靠 DOM 顺序压人）→ **淡出**（`.bl-fab-hidden`：
+     *    opacity:0 + 不吃点击），弹层一走立刻回来。
+     *    注意"就地磨砂"那版已删：`filter:blur` + `backdrop-filter` 会把合成层重新栅格化，
+     *    用户看到的就是"整块发糊 / 分辨率变低"。
+     * canFade=true 的（22px 地球钮）走②；观察窗太大，淡出比压着更烦，所以它只走①。 */
+    function applyYield(el, canFade) {
+      if (!el || !el.dataset) return
+      var info = overlayInfo(el)
+      if (info.z <= 1 && !info.popup && !ownSettingsOpen()) {
+        // 头上没人（或只是普通内容）：回到正常层级与不透明
+        el.style.zIndex = ''
+        el.dataset.blYield = ''
+        if (el.classList) el.classList.remove('bl-fab-hidden')
         return
       }
-      var z = overlayZAt(fab)
-      if (z > 1) {
-        // 真的沉下去了：不加任何装饰性样式，朦胧感由那层遮罩的 backdrop-filter 提供
-        fab.style.zIndex = String(z - 1)
-        fab.dataset.blYield = 'sunk'
-        if (fab.classList) fab.classList.remove('bl-fab-ghost')
-      } else {
-        fab.style.zIndex = ''
-        fab.dataset.blYield = 'ghost'
-        if (fab.classList) fab.classList.add('bl-fab-ghost')
+      if (info.z > 1) {
+        // ① 真的沉下去了：不加任何装饰性样式，朦胧感由那层弹层自己的半透明给
+        el.style.zIndex = String(info.z - 1)
+        el.dataset.blYield = 'sunk'
+        if (el.classList) el.classList.remove('bl-fab-hidden')
+      } else if (canFade) {
+        // ② 认得出是弹层却量不到层级：淡出（不磨砂 —— 磨砂就是"分辨率变低"的来源）
+        el.style.zIndex = ''
+        el.dataset.blYield = 'hidden'
+        if (el.classList) el.classList.add('bl-fab-hidden')
       }
     }
     function syncFabYield() {
-      applyFabYield(S.stackedFab)
-      applyFabYield(document.getElementById('bl-fab-fallback'))
+      applyYield(S.stackedFab, true)
+      applyYield(document.getElementById('bl-fab-fallback'), true)
+      applyYield(els.panel, false)   // 观察窗同待遇：设置页弹在它上面时也要沉下去
     }
     function stackedPossible() { return !!document.querySelector('.bga-orb') }
     function stackDotTick() {
@@ -786,7 +853,7 @@ window.__ModuleLoader__.load({
         fab.style.display = ''
         fab.style.left = Math.round(cx0 + dx - STACK_FAB / 2) + 'px'
         fab.style.top = Math.round(Math.max(4, fabTop)) + 'px'
-        applyFabYield(fab)   // 位置定了再判让位：要让位时得按新位置去量遮罩层级
+        applyYield(fab, true)   // 位置定了再判让位：要让位时得按新位置去量遮罩层级
         stackDotTick()
       } catch (e) {
         // 任何测量异常都不能吃掉地球钮：退回原生槽位显示
@@ -801,6 +868,28 @@ window.__ModuleLoader__.load({
       var t = setInterval(stackedTick, 600)
       window.addEventListener('resize', stackedTick)
       // 无独立清理：生命周期与页面共存；插件停用时整页重载才会移除。
+      void t
+    }
+
+    // ------------------------------------------------------------------ 让位的响应速度
+    // 几何 ticker 是 600ms 的（它要量宝珠、改 CSS 变量，贵），但让位靠它就跟不上手速：
+    // 用户 2026-10-02 报"延迟沉底"。弹层几乎都是"点一下才出来"的，所以：
+    //   ① 点下去（click/pointerdown，捕获相）就先补测 0/60/180ms 三拍 —— 覆盖菜单挂载
+    //      和它自己那两帧入场动画；
+    //   ② 让位另开一条 250ms 的轮询（只做让位，不碰几何），兜住 hover 打开 / 程序化打开的弹层。
+    // 两条都比"等下一个 600ms 几何 tick"快，代价是每秒多几次 elementsFromPoint。
+    function nudgeYield() {
+      syncFabYield()
+      setTimeout(syncFabYield, 60)
+      setTimeout(syncFabYield, 180)
+    }
+    function startYieldTicker() {
+      if (startYieldTicker.done) return
+      startYieldTicker.done = true
+      document.addEventListener('click', nudgeYield, true)
+      document.addEventListener('pointerdown', nudgeYield, true)
+      var t = setInterval(function () { if (!document.hidden) syncFabYield() }, 250)
+      window.addEventListener('resize', syncFabYield)
       void t
     }
 
@@ -945,6 +1034,31 @@ window.__ModuleLoader__.load({
 
     // ---------------------------------------------------------------- 设置页分区
 
+    // 形状照底图工坊（dsh-bg-atelier-official/client.js 的 Section/Slider 那套）：
+    // 标题 + 一句小字说明，然后一张卡，卡里每行都是「左标签 / 右控件」；进阶项收进 <details>。
+    // 官方客户端只挂载当前选中的那一个设置分区，所以这里的先后顺序就是用户读到的顺序：
+    // 状态 → 形态 → 尺寸 → 折叠的进阶组 → 注脚。颜色一律走主题 token（浅色/深色都不用改这里）。
+    function SetSection(title, sub) {
+      var kids = Array.prototype.slice.call(arguments, 2)
+      return h('section', { style: { marginBottom: 16 } },
+        h('h3', { className: 'bl-h' }, title),
+        sub ? h('p', { className: 'bl-sub' }, sub) : null,
+        h.apply(null, ['div', null].concat(kids)))
+    }
+    /** 一行：左标签（可带一句小字）+ 右侧控件。子节点走 apply 平铺，免得 React 要 key。 */
+    function SetRow(label, hint) {
+      var kids = Array.prototype.slice.call(arguments, 2)
+      return h('div', { className: 'bl-row' },
+        h('div', { className: 'bl-lab' }, label, hint ? h('small', null, hint) : null),
+        h.apply(null, ['div', { className: 'bl-ctl' }].concat(kids)))
+    }
+    function SetGroup(title, open) {
+      var kids = Array.prototype.slice.call(arguments, 2)
+      return h('details', { className: 'bl-group', open: !!open },
+        h('summary', null, title),
+        h.apply(null, ['div', null].concat(kids)))
+    }
+
     function SettingsSection() {
       var st = React.useState(null)
       var state = st[0], setState = st[1]
@@ -1004,160 +1118,116 @@ window.__ModuleLoader__.load({
             loadBridge()
           }).catch(function () { setNote('保存失败') })
       }
-      var lab = { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', width: 96, flex: 'none' }
-      var box = { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }
-      var inp = { flex: '1', minWidth: 160, fontSize: 12, padding: '4px 7px', borderRadius: 7, border: '1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.3))', background: 'transparent', color: 'inherit' }
-      // cfg 还在飞（首次渲染 null）时先拿 S.liveView 顶上，别让「内嵌面板」闪一下选中态
+// cfg 还在飞（首次渲染 null）时先拿 S.liveView 顶上，别让「内嵌面板」闪一下选中态
       var lv = cfg ? cfg.liveView : (S.liveView ? 'standalone' : 'panel')
-      return h('div', { className: 'bl-settings' },
-        h('p', { style: { fontSize: 12.5, lineHeight: 1.8, margin: '2px 0 10px' } },
-          '让 agent 驱动真实浏览器（本机 Chrome/Edge），你在观察窗里实时可见、可直接接管。',
-          '共 21 个 browser_* 工具：open/ext_setup/navigate/snapshot/click/move/type/press/scroll/upload/wait/eval/text/read/scrape/search/screenshot/tabs/history/downloads/close。',
-          '登录态保存在 ' + '$DSH_HOME/dsh-browser-live/chrome-profile。'),
-        h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 14 } },
-          h('span', { className: 'bl-dot' + (state && state.alive ? ' on' : ''), style: { width: 9, height: 9 } }),
-          h('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, state && state.alive ? '浏览器运行中' : '浏览器未运行（agent 调用工具时自动拉起）'),
-          h('button', { className: 'bl-btn', onClick: togglePanel }, (S.open || (S.viewWin && !S.viewWin.closed)) ? '收起/聚焦观察窗' : '打开观察窗')),
-        h('div', { style: box },
-          h('span', { style: lab }, '观察窗形态'),
-          h('button', { className: 'bl-btn' + (lv !== 'standalone' ? ' bl-on' : ''), onClick: function () { put({ liveView: 'panel' }, '已切回 DSH 内嵌面板') }, title: '在 DSH 右下角浮动面板里看' }, '内嵌面板'),
-          h('button', { className: 'bl-btn' + (lv === 'standalone' ? ' bl-on' : ''), onClick: function () { put({ liveView: 'standalone' }, '已切换：独立网页（/bl/view）') }, title: '弹出独立网页，可拖到副屏、F11 全屏' }, '独立网页'),
-          h('span', { style: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' } }, '独立网页 = 新标签页里的全屏观察窗；面板标题栏的 ⧉ 也能随时弹出')),
-        // 面板几何：百分比（v0.12.0）。原来写死 px，宽屏上面板不再跟着变大；现在这三项都是"视口百分比"，
-        // 改完立刻生效（applyPanelGeometry 直接改 CSS 变量，不用重启、也不用等下次拉帧）。
-        h('div', { style: box },
-          h('span', { style: lab }, '面板宽度 %'),
-          h('input', { style: { ...inp, flex: '0 1 90px', minWidth: 70 }, type: 'number', min: 15, max: 95, value: geom.pw, onChange: function (e) { setGeom({ ...geom, pw: e.target.value }) } }),
-          h('span', { style: lab }, '面板高度 %'),
-          h('input', { style: { ...inp, flex: '0 1 90px', minWidth: 70 }, type: 'number', min: 15, max: 95, value: geom.ph, onChange: function (e) { setGeom({ ...geom, ph: e.target.value }) } }),
-          h('span', { style: lab }, '宽屏宽 %'),
-          h('input', { style: { ...inp, flex: '0 1 90px', minWidth: 70 }, type: 'number', min: 15, max: 98, value: geom.pww, onChange: function (e) { setGeom({ ...geom, pww: e.target.value }) } }),
-          h('button', {
-            className: 'bl-btn', onClick: function () {
+      var bm = cfg ? (cfg.backendMode || 'auto') : 'auto'
+      var alive = !!(state && state.alive)
+      var watching = S.open || !!(S.viewWin && !S.viewWin.closed)
+      var blist = (br && br.browsers) || []
+      var connected = function (k) { return !!blist.filter(function (x) { return x.kind === k && x.connected })[0] }
+      var connectedNames = blist.filter(function (b) { return b.connected }).map(function (b) {
+        return (b.kind === 'edge' ? 'Edge' : b.kind === 'chrome' ? 'Chrome' : b.kind) +
+          '（' + b.tabs + ' 标签' + (b.active ? ' · 当前在用' : '') + '）'
+      }).join(' · ')
+      var optionBtn = function (on, onClick, text, title) {
+        return h('button', { className: 'bl-btn' + (on ? ' bl-on' : ''), onClick: onClick, title: title }, text)
+      }
+      var numBox = function (v, min, max, onChange) {
+        return h('input', { className: 'bl-inp bl-num', type: 'number', min: min, max: max, value: v, onChange: onChange })
+      }
+      return h('div', { className: 'bl-set' },
+        SetSection('浏览器观察窗', '让 agent 驱动真实浏览器（本机 Chrome / Edge），你在观察窗里实时可见、可直接接管。'),
+        h('div', { className: 'bl-hero' + (alive ? ' on' : '') },
+          h('span', { className: 'bl-dot' + (alive ? ' on' : '') }),
+          h('div', { className: 'bl-hero-main' },
+            h('div', { className: 'bl-hero-name' }, alive ? '浏览器运行中' : '浏览器未运行'),
+            h('div', { className: 'bl-hero-meta' }, alive
+              ? 'agent 的每一步都显示在观察窗里，你可以直接接管鼠标键盘'
+              : 'agent 第一次调用 browser_* 工具时自动拉起（21 个：open / navigate / snapshot / click / type / read / scrape / search / screenshot / tabs …）')),
+          h('button', { className: 'bl-btn' + (watching ? ' bl-on' : ''), onClick: togglePanel, title: '打开或收起右下角的观察窗' }, watching ? '聚焦观察窗' : '打开观察窗')),
+        h('p', { className: 'bl-sub', style: { margin: '-4px 0 14px' } },
+          '登录态保存在 $DSH_HOME/dsh-browser-live/chrome-profile —— 换机器时拷这个目录即可沿用登录态。'),
+        h('div', { className: 'bl-card' },
+          SetRow('观察窗形态', '独立网页可拖到副屏、F11 全屏',
+            optionBtn(lv !== 'standalone', function () { put({ liveView: 'panel' }, '已切回 DSH 内嵌面板') }, '内嵌面板', '在 DSH 右下角浮动面板里看'),
+            optionBtn(lv === 'standalone', function () { put({ liveView: 'standalone' }, '已切换：独立网页（/bl/view）') }, '独立网页', '弹出独立网页，可拖到副屏、F11 全屏')),
+          SetRow('面板尺寸', '宽 / 高 / 宽屏都是视口百分比，换窗口自动等比',
+            numBox(geom.pw, 15, 95, function (e) { setGeom({ ...geom, pw: e.target.value }) }),
+            h('span', { className: 'bl-unit' }, '宽'),
+            numBox(geom.ph, 15, 95, function (e) { setGeom({ ...geom, ph: e.target.value }) }),
+            h('span', { className: 'bl-unit' }, '高'),
+            numBox(geom.pww, 15, 98, function (e) { setGeom({ ...geom, pww: e.target.value }) }),
+            h('span', { className: 'bl-unit' }, '宽屏'),
+            optionBtn(false, function () {
               var patch = { panelWidthPct: Number(geom.pw) || 42, panelHeightPct: Number(geom.ph) || 52, panelWidePct: Number(geom.pww) || 66 }
               applyPanelGeometry(patch)                 // 先本地生效，别等往返
-              put(patch, '面板尺寸已保存（百分比，即时生效）')
-            },
-          }, '保存')),
-        h('div', { style: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary)', margin: '-4px 0 8px' } },
-          '面板宽/高都是视口百分比 ⇒ 换窗口大小、换显示器都自动等比（窄窗口由可读下限与视口边界兜底）。'),
-        h('div', { style: box },
-          h('span', { style: lab }, '代理服务器'),
-          h('input', { style: inp, placeholder: '如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080；留空=跟随系统', value: proxy, onChange: function (e) { setProxy(e.target.value) } }),
-          h('button', { className: 'bl-btn', onClick: function () { put({ proxy: proxy.trim() }, '代理已保存（下次拉起浏览器生效）') } }, '保存')),
-        h('div', { style: box },
-          h('span', { style: lab }, '额外启动参数'),
-          h('input', { style: inp, placeholder: '空格分隔，追加到 Chrome 命令行，如 --host-resolver-rules="MAP x.y.z.w 127.0.0.1"', value: extra, onChange: function (e) { setExtra(e.target.value) } }),
-          h('button', { className: 'bl-btn', onClick: function () { put({ extraArgs: extra }, '启动参数已保存（下次拉起浏览器生效）') } }, '保存')),
-        // ---- 用哪个浏览器（v0.6.2 三档）----
-        // 关键区别：插件自带实例**不受逐站点授权限制**，所以"不是要登录的页面"直接用它就行；
-        // 用户的日常浏览器是逐站点授权的，只有确实要借用你的登录态时才值得切过去。
-        h('div', { style: box },
-          h('span', { style: lab }, '用哪个浏览器'),
-          h('button', {
-            className: 'bl-btn' + (!cfg || (cfg.backendMode || 'auto') === 'auto' ? ' bl-on' : ''),
-            onClick: function () { put({ backendMode: 'auto' }, '已设为默认：免登录页用插件自带实例（免授权、可新开页面）；要登录态的站我在扩展里授权后切你的浏览器') },
-            title: '推荐：不用授权的页一律走插件自己的窗口；需要你的登录态时才切到你的浏览器',
-          }, '免登录用自带实例（推荐）'),
-          h('button', {
-            className: 'bl-btn' + (cfg && cfg.backendMode === 'plugin' ? ' bl-on' : ''),
-            onClick: function () { put({ backendMode: 'plugin' }, '已锁定：只用插件自带实例（你的日常浏览器一律不参与）') },
-            title: '只用自己的实例，永远不碰你的浏览器',
-          }, '只用自带实例'),
-          h('button', {
-            className: 'bl-btn' + (cfg && cfg.backendMode === 'user' ? ' bl-on' : ''),
-            onClick: function () { put({ backendMode: 'user' }, '已切换：默认就用你的日常浏览器（逐站点授权、默认只读）') },
-            title: '与旧行为一致：默认在你的浏览器里操作，站点需先在扩展里允许',
-          }, '只用我的浏览器'),
-        ),
-        h('div', { style: { fontSize: 11.5, lineHeight: 1.7, color: 'var(--dsw-alias-label-secondary)', margin: '0 0 10px' } },
-          (cfg && cfg.backendMode === 'user')
-            ? '当前：默认在你的日常浏览器里操作（逐站点授权、默认只读；没授权过的站点会直接报"站点未授权"，且不能新开标签页）。'
-            : (cfg && cfg.backendMode === 'plugin')
-              ? '当前：只用插件自带实例（独立窗口 + 独立 profile，登录态存在插件目录），完全不碰你的日常浏览器；需要你的登录态时它帮不上忙。'
-              : '当前（推荐）：「免登录的网页」用 agent 自己的独立窗口开（不受逐站点授权限制、可新开页面），你的浏览器不受影响；'
-                + '只有需要"你的登录态"时，我在扩展里给该站点授权后才切到你的浏览器操作，做完再切回独立窗口。'),
-        // ---- v0.7：Chrome / Edge 可同时接入，按调用指定 ----
-        h('div', { style: box },
-          h('span', { style: lab }, '默认浏览器'),
-          (function () {
-            var list = (br && br.browsers) || []
-            var live = list.filter(function (b) { return b.connected })
-            var btns = []
-            btns.push(h('button', {
-              className: 'bl-btn' + (!(br && br.userDefault) ? ' bl-on' : ''),
-              title: '不指定：use:"user" 时用任一已接入的浏览器（有多个时按 Chrome → Edge 顺序）',
-              onClick: function () { put({ userDefault: '' }, '已清空默认浏览器：use:"user" 时自动挑一个已接入的') },
-            }, '自动'))
-            ;['chrome', 'edge'].forEach(function (k) {
-              var b = list.filter(function (x) { return x.kind === k })[0]
-              var on = !!(br && br.userDefault === k)
-              btns.push(h('button', {
-                className: 'bl-btn' + (on ? ' bl-on' : ''),
-                title: b && b.connected ? '这台已接入' : '这台还没接入（在该浏览器里装扩展并点连接）',
+              put(patch, '面板尺寸已保存（即时生效）')
+            }, '保存', '面板宽/高是视口百分比 ⇒ 换窗口、换显示器都自动等比'))),
+        SetGroup('启动与连接', false,
+          SetRow('代理服务器', '留空 = 跟随系统',
+            h('input', { className: 'bl-inp', placeholder: 'http://127.0.0.1:7890 或 socks5://127.0.0.1:1080', value: proxy, onChange: function (e) { setProxy(e.target.value) } }),
+            optionBtn(false, function () { put({ proxy: proxy.trim() }, '代理已保存（下次拉起浏览器生效）') }, '保存', '下次拉起浏览器才生效')),
+          SetRow('额外启动参数', '空格分隔，追加到 Chrome 命令行',
+            h('input', { className: 'bl-inp', placeholder: '--host-resolver-rules="MAP x.y.z.w 127.0.0.1"', value: extra, onChange: function (e) { setExtra(e.target.value) } }),
+            optionBtn(false, function () { put({ extraArgs: extra }, '启动参数已保存（下次拉起浏览器生效）') }, '保存', '下次拉起浏览器才生效')),
+          SetRow('用哪个浏览器', '免登录的页用自带实例最省事',
+            optionBtn(bm === 'auto', function () { put({ backendMode: 'auto' }, '已设为默认：免登录页用插件自带实例') }, '免登录用自带实例', '推荐：不用授权的页一律走插件自己的窗口'),
+            optionBtn(bm === 'plugin', function () { put({ backendMode: 'plugin' }, '已锁定：只用插件自带实例') }, '只用自带实例', '只用自己的实例，永远不碰你的浏览器'),
+            optionBtn(bm === 'user', function () { put({ backendMode: 'user' }, '已切换：默认就用你的日常浏览器') }, '只用我的浏览器', '默认在你的浏览器里操作，站点需先在扩展里允许')),
+          h('p', { className: 'bl-note', style: { margin: '10px 14px' } },
+            bm === 'user'
+              ? '当前：默认在你的日常浏览器里操作（逐站点授权、默认只读；没授权过的站点会直接报「站点未授权」，且不能新开标签页）。'
+              : bm === 'plugin'
+                ? '当前：只用插件自带实例（独立窗口 + 独立 profile，登录态存在插件目录），完全不碰你的日常浏览器；需要你的登录态时它帮不上忙。'
+                : '当前（推荐）：「免登录的网页」用 agent 自己的独立窗口开（不受逐站点授权限制、可新开页面）；只有需要「你的登录态」时，我在扩展里授权后才切到你的浏览器，做完再切回。'),
+          SetRow('默认浏览器', '只是 use:"user" 的兜底',
+            optionBtn(!(br && br.userDefault), function () { put({ userDefault: '' }, '已清空默认浏览器') }, '自动', '不指定：use:"user" 时用任一已接入的浏览器'),
+            ['chrome', 'edge'].map(function (k) {
+              return h('button', {
+                key: k,
+                className: 'bl-btn' + (br && br.userDefault === k ? ' bl-on' : ''),
+                title: connected(k) ? '这台已接入' : '这台还没接入（在该浏览器里装扩展并点连接）',
                 onClick: function () { put({ userDefault: k }, 'use:"user" 时默认用 ' + (k === 'edge' ? 'Edge' : 'Chrome')) },
-              }, (k === 'edge' ? 'Edge' : 'Chrome') + (b && b.connected ? ' ✓' : '')))
-            })
-            return h('span', null, btns)
-          })(),
-          h('span', { style: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' } },
-            '只是 use:"user" 的兜底；工具里直接写 use:"edge" / use:"chrome" 永远优先')),
-        // ---- P0：接管你自己的浏览器（扩展路线）----
-        h('div', { style: box },
-          h('span', { style: lab }, '用户浏览器'),
-          h('button', {
-            className: 'bl-btn' + (cfg && cfg.userBridge ? ' bl-on' : ''),
-            onClick: function () {
+              }, (k === 'edge' ? 'Edge' : 'Chrome') + (connected(k) ? ' ✓' : ''))
+            }))),
+        SetGroup('接管你自己的浏览器（MV3 扩展 + 本地桥）', false,
+          SetRow('用户浏览器桥', '逐站点授权；默认只读，扩展里打开「允许操作」后可真点击 / 打字',
+            optionBtn(!!(cfg && cfg.userBridge), function () {
               var on = !(cfg && cfg.userBridge)
               put({ userBridge: on }, on ? '桥已开启：在 Chrome/Edge 里装好扩展并粘上 token 即可接管' : '桥已关闭：回到插件自拉实例')
-            },
-          }, cfg && cfg.userBridge ? '桥已开启' : '桥已关闭'),
-          h('span', { style: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' } },
-            '逐站点授权；默认只读，扩展里打开「允许操作」后可真点击/打字')),
-        (cfg && cfg.userBridge)
-          ? h('div', { style: { fontSize: 11.5, lineHeight: 1.7, color: 'var(--dsw-alias-label-secondary)', margin: '0 0 8px', padding: '7px 9px', borderRadius: 8, border: '1px solid ' + (br && br.connected ? 'rgba(198,40,40,.45)' : 'var(--dsw-alias-border-l2,rgba(127,127,127,.3))') } },
-            h('div', null, (function () {
-              var list = (br && br.browsers) || []
-              var live = list.filter(function (b) { return b.connected })
-              if (!live.length) return '⏳ 桥在 127.0.0.1:' + ((br && br.port) || '…') + '，还没有浏览器接入'
-              return '🔴 已接入：' + live.map(function (b) {
-                return (b.kind === 'edge' ? 'Edge' : b.kind === 'chrome' ? 'Chrome' : b.kind) +
-                  '（' + b.tabs + ' 标签' + (b.active ? ' · 当前在用' : '') + '）'
-              }).join(' · ')
-            })()),
-            h('div', { style: { marginTop: 4 } },
+            }, cfg && cfg.userBridge ? '桥已开启' : '桥已关闭')),
+          (cfg && cfg.userBridge) ? h('div', { className: 'bl-bridge' + (br && br.connected ? ' on' : '') },
+            h('div', null, connectedNames ? '🔴 已接入：' + connectedNames : '⏳ 桥在 127.0.0.1:' + ((br && br.port) || '…') + '，还没有浏览器接入'),
+            h('div', { className: 'bl-hero-meta' },
               '授权：' + ((br && br.allowAll) ? '所有网站（高风险）' : (((br && br.origins) || []).length ? ((br.origins || []).length + ' 个站点') : '无')) +
-              ' · 允许操作：' + ((br && br.allowInput) ? '⚠ 开（可真点击/打字）' : '关（只读）') +
-              '（在扩展弹窗里改）'),
-            h('div', { style: { marginTop: 4, wordBreak: 'break-all' } }, 'token: ' + ((br && br.token) || '…'),
-              h('button', { className: 'bl-btn', style: { marginLeft: 6, height: 22, padding: '0 7px' }, onClick: function () { try { navigator.clipboard.writeText((br && br.token) || '') ; setNote('token 已复制') ; setTimeout(function () { setNote('') }, 2200) } catch (e) { setNote('复制失败，手动从 bridge.json 取') } } }, '复制')),
+              ' · 允许操作：' + ((br && br.allowInput) ? '⚠ 开（可真点击 / 打字）' : '关（只读）') + '（在扩展弹窗里改）'),
+            h('div', { className: 'bl-token' }, 'token: ' + ((br && br.token) || '…'),
+              optionBtn(false, function () {
+                try { navigator.clipboard.writeText((br && br.token) || ''); setNote('token 已复制'); setTimeout(function () { setNote('') }, 2200) }
+                catch (e) { setNote('复制失败，手动从 bridge.json 取') }
+              }, '复制')),
             (br && br.enabled === false)
-              ? h('div', { style: { marginTop: 6 } },
-                h('button', {
-                  className: 'bl-btn', style: { height: 24, padding: '0 9px' },
-                  onClick: function () {
-                    api('/bl/settings.json', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userBridge: true }) })
-                      .then(function (j) {
-                        if (j && j.ok) { setNote('桥已启用，token 出来了 —— 按下面步骤装扩展'); loadBridge(); setTimeout(function () { setNote('') }, 4000) }
-                        else setNote('启用失败：' + ((j && j.error) || '看 DSH 日志'))
-                      })
-                      .catch(function () { setNote('启用失败，看 DSH 日志') })
-                  },
-                }, '① 启用用户浏览器桥（现在没开，扩展装了也连不上）'))
+              ? optionBtn(false, function () {
+                api('/bl/settings.json', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userBridge: true }) })
+                  .then(function (j) {
+                    if (j && j.ok) { setNote('桥已启用，token 出来了 —— 按下面步骤装扩展'); loadBridge(); setTimeout(function () { setNote('') }, 4000) }
+                    else setNote('启用失败：' + ((j && j.error) || '看 DSH 日志'))
+                  })
+                  .catch(function () { setNote('启用失败，看 DSH 日志') })
+              }, '① 启用用户浏览器桥（现在没开，扩展装了也连不上）')
               : null,
-            h('div', { style: { marginTop: 4 } },
-              (br && br.enabled === false ? '② ' : '') + '装扩展（Chrome 和 Edge 各装一次，可同时接入）：',
-              h('div', null, '· Edge：地址栏输 edge://extensions → 打开「开发人员模式」→「加载解压缩的扩展」→ 选 ' + ((br && br.extensionDir) || 'extension 目录')),
+            h('div', { className: 'bl-steps' },
+              h('div', null, ((br && br.enabled === false) ? '② ' : '') + '装扩展（Chrome 和 Edge 各装一次，可同时接入）：'),
+              h('div', null, '· Edge：地址栏输 edge://extensions → 开「开发人员模式」→「加载解压缩的扩展」→ 选 ' + ((br && br.extensionDir) || 'extension 目录')),
               h('div', null, '· Chrome：地址栏输 chrome://extensions → 同上流程'),
-              h('div', null, '· 装完点工具栏里的扩展图标 → 粘上 token → 点「连接」；再点「允许当前所有标签页」把你要交给我操作的站点一次授权。'),
-              h('div', { style: { marginTop: 2, color: 'var(--dsw-alias-label-tertiary)' } },
-                '· 也可以直接交给 agent：调 browser_ext_setup —— 它会开桥、把 token 放进剪贴板，并把扩展页与扩展目录一起打开。')),
-            h('div', { style: { marginTop: 2, color: 'var(--dsw-alias-label-tertiary)' } },
-              '怎么用：要登录的站点先在扩展弹窗里点「允许」（或「允许当前所有标签页」），再让我用 browser_open {use:"edge"} 或 {use:"chrome"} 指定这台浏览器；做完 {use:"plugin"} 切回独立窗口。' +
-              '边界：默认只读（能看能导航）；「允许操作」打开后我才能真点击/打字/上传，且只在已授权站点上生效；新建/关闭标签页、改网络仍被拒。browser_close 只断开读取，不关你的浏览器。'))
-          : null,
-        noteTxt ? h('p', { style: { fontSize: 12, color: 'var(--dsw-alias-brand-primary,#5b8def)', margin: '2px 0 0' } }, noteTxt) : null,
-        h('p', { style: { fontSize: 11.5, color: 'var(--dsw-alias-label-tertiary)', margin: '8px 0 0' } },
+              h('div', null, '· 装完点工具栏里的扩展图标 → 粘上 token → 点「连接」；再点「允许当前所有标签页」把要交给我操作的站点一次授权。'),
+              h('div', null, '· 也可以直接交给 agent：调 browser_ext_setup —— 它会开桥、把 token 放进剪贴板，并把扩展页与扩展目录一起打开。')))
+            : null,
+          h('p', { className: 'bl-note', style: { margin: '10px 14px' } },
+            '怎么用：要登录的站点先在扩展弹窗里点「允许」（或「允许当前所有标签页」），再让我用 browser_open {use:"edge"} 或 {use:"chrome"} 指定这台浏览器；做完 {use:"plugin"} 切回独立窗口。' +
+            '边界：默认只读（能看能导航）；「允许操作」打开后我才能真点击 / 打字 / 上传，且只在已授权站点上生效；新建 / 关闭标签页、改网络仍被拒。browser_close 只断开读取，不关你的浏览器。')),
+        noteTxt ? h('p', { className: 'bl-note bl-ok' }, noteTxt) : null,
+        h('p', { className: 'bl-note', style: { borderLeftColor: 'transparent', paddingLeft: 0 } },
           '代理与额外参数改动不在已运行的浏览器上生效：点面板「⏹ 关浏览器」或让 agent 关闭后重新拉起即带上；',
           '独立网页形态下 agent 冷启动浏览器时会自动弹 /bl/view（被浏览器拦弹窗时自动退回内嵌面板）。'))
     }
@@ -1174,6 +1244,7 @@ window.__ModuleLoader__.load({
       fetchSettings()
       if (slots === undefined || !React) {
         // 非 web/无 React 环境：自建浮动球兜底
+        startYieldTicker()   // 兜底球也是 fixed 近上限层级，弹层开着照样要让位
         if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', ensureFallbackFab)
         else ensureFallbackFab()
         return
@@ -1216,6 +1287,7 @@ window.__ModuleLoader__.load({
       })
       // 预热状态轮询（决定浮球绿点与自动弹窗）；bg-atelier 宝珠存在时叠列地球钮
       startStackTicker()
+      startYieldTicker()   // 让位独立于几何 ticker（点一下就先补测，不等 600ms）
       if (!S.poll) { S.poll = setInterval(pollState, 2500); pollState() }
     }
 

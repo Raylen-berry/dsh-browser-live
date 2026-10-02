@@ -1,5 +1,109 @@
 # 变更记录
 
+## 2026-10-02 · 三次修正：让位不再等 600ms 几何 tick（点一下就先补测）—— 用户报"延迟沉底"
+
+**现场**：用户 2026-10-02 第三条反馈："之前其实已经可以了，但你又改了一下，现在是延迟沉底。"
+
+**根因**（不是上一版新引入的，是**一直就在**的旧结构，只是上一版终于把弹层认对了，
+延迟才变得看得见）：让位唯一挂在 `stackedTick` 里，而那个 ticker 是 **600ms** 的 ——
+它要量宝珠几何、写 `--bga-orb-dy/dx` 与 left/top，贵，所以周期压不下去。于是
+"点开菜单 → 地球让位"最坏要等 600ms，手快就是"点了没反应"。
+
+**改法**（把让位从几何 ticker 里单拎出来，两条都比 600ms 快）：
+- `startYieldTicker()`：`click` / `pointerdown`（**捕获相**）里调 `nudgeYield()` ——
+  先同步测一次，再补 0/60/180ms 三拍，覆盖菜单挂载 + 它自己那两帧入场动画；
+- 另一条 250ms 轮询只做让位（`document.hidden` 时跳过），兜住 hover 打开 / 程序化打开的弹层；
+- `resize` 也补一次。几何 ticker 仍是 600ms，没动。
+- Web 路径与"无 slots 的兜底球"路径都调了 `startYieldTicker()`。
+
+**验证**（浏览器端实测，模拟"点一下 → 菜单出来"）：
+`latencyMs = 80`（之前最坏 600ms）；采样 `1ms:'|-|op1'` → `80ms:'|hidden|op0.99'`（已在让位，
+opacity 正在淡出）；移除弹层后回到 `|-|op1`。上一轮那张分类表（空闲 / 设置弹层 sunk /
+role=menu 淡出 / 普通块不动 / z:1500 沉到 1499）逐条重测仍全绿。`node --check` 通过。
+
+## 2026-10-02 · 二次修正：删掉"就地磨砂"（它就是"分辨率变低"）、删掉全局 aria 信号（它会把地球永久藏掉）
+
+用户第二次反馈两条，都是上一版（同一天早些时候那条）自己引入的：
+
+**① "UI 分辨率变低" = 那版还在用的"就地磨砂"退路。**
+`.bl-fab-ghost{filter:blur(2px) saturate(.7)}` + `.bl-fab-ghost::before{backdrop-filter:blur(7px)}`：
+`filter` 会把浮球所在的合成层重新栅格化，`backdrop-filter` 还会就地立一个 backdrop root ——
+观感就是整块发糊。而且它跟需求相反：要让开就该躲开，不是把自己糊在人脸上。
+**改法**：整条磨砂退路删除，退路换成 `.bl-fab-hidden{opacity:0;pointer-events:none}`（淡出、
+不吃点击），弹层一走立刻回来；`.bl-fab` 的 transition 也只剩 opacity。
+
+**② 第二版加的全局弹层信号是错的，会把地球永久藏掉。**
+那版把 `document.querySelector('[aria-expanded="true"]')` 当"菜单开着"的信号。实测**空闲状态下**
+本就有 4 个 `aria-expanded="true"`：工作区行 `hIlkoa_projectRow`（展开的工作区）、两条"处理失败"
+折叠行、以及设置触发器本身 —— 于是地球 `dataset.blYield=hidden` / `opacity:0`，**用户再也点不到
+观察窗**（这条是实测数字抓到的，不是推演）。
+**改法**：所有信号只认**压在我中心点上的那个元素自己**（`coverAt()` 取 `elementsFromPoint` 里第一
+个"不是自己 / 不是自己子孙 / 不属于本插件另一块浮层"的元素）：
+- 它自己或祖先带 `role=menu|listbox|dialog` / `aria-modal` ⇒ 认作弹层；
+- 或者它挂在带数值 z 的浮层上（实测设置那层 z:1000、公共 Menu portal z:1100）；
+- 两条都不命中就当我头上没人。
+唯一保留的全局信号是 `S.settingsUi > 0`（= **本插件**的设置分区在挂载 ⇒ 设置页一定开着）。
+
+**验证**（浏览器端逐条实测，全部通过）：
+
+| 场景 | 期望 | 实测 |
+|---|---|---|
+| 空闲（无任何弹层） | 正常 | `zIndex=''` / `blYield=''` / `opacity:1` |
+| 设置弹层（停在「通用设置」，量得到 z:1000） | 沉下去 | 地球与观察窗都 `999/sunk`，`filter:none` |
+| 叠一块 `role="menu"`、`z-index:auto` 的浮层（量不到层级） | 淡出、不磨砂 | `blYield='hidden'` / `opacity:0` / `filter:none` |
+| 移除后 | 立刻回来 | `zIndex=''` / `blYield=''` / `opacity:1` |
+| 叠一块 `z-index:auto`、无 role 的普通块（冒充身下的侧栏） | 完全不动 | `zIndex=''` / `blYield=''` |
+| 叠一块 `z-index:1500` 的浮层 | 沉到 1499 | `1499/sunk` |
+
+`node --check client.js` / `index.js` 均通过。
+**待用户复核**：真账号菜单走的是这两条信号之一（公共 Menu 的 portal `z-index:1100`，且公共 Menu 是
+`role=menu`）；插件自带 Chrome 是干净 profile、没登录 DeepSeek 账号，本机开不出那个菜单。
+
+## 2026-10-02 · 官方版客户端：让位判据重写（账号菜单 / 设置遮罩都躲），观察窗一并让位；设置页重排（不动版本号）
+
+**现场**（官方 DSH Desktop，`$DSH_HOME/profiles/desktop`，客户端在 127.0.0.1:19387）。
+第一次报的是点「设置」后观察窗亮在设置遮罩上；用户 2026-10-02 补的图把根因钉死了：
+**左下角账号菜单**（设置 / 意见反馈 / 退出登录，约 200×150）弹出来时，🌐 地球钮**压在"意见反馈"那行上**。
+
+**根因**（两条，任一条都够）：
+1. 闸门 `fabShouldYield()` 靠 `S.settingsUi > 0` —— 那是"**本插件**的设置分区挂载中"，只在用户
+   点进「浏览器观察窗」那一页时才成立。官方客户端**只挂载当前选中的那一个**设置分区 ⇒ 点
+   「通用设置」时计数恒为 0。`[role="dialog"]` 那条也要等弹层结构成形才在。
+2. 更致命的是 v0.4.2 起那道**面积闸门**：`overlayZAt()` 要求"盖住 ≥1/4 视口"才算遮罩。
+   账号菜单 200×150 = 30k px²，阈值 1418×776×0.25 = 275k px² —— 它永远看不见小弹层。
+   另外 `.bl-panel` 当时**压根没走过让位这条路**（只有 `.bl-fab` 走了），z=3460 一路压在设置页上。
+
+**改法**：
+- 判据换成"**重叠 + 浮层身份**"：`overlayZAt(el)` 在自己中心点做 `elementsFromPoint`，取第一个
+  不是自己 / 不是自己子孙、也不属于本插件另一块浮层的元素，沿它的祖先链取最大数值 z-index；
+  有值就让位，自己设成 z-1（`dataset.blYield = 'sunk'`）。**删掉面积闸门**（`YIELD_COVER`）。
+- 为什么不是"绘制顺序排在我前面的才算压着我"：试过、**错的**。真弹层排在**我后面** —— 地球 z 近
+  上限，是盖着菜单画的；用户要的恰恰是"菜单弹出来时我躲下去"。所以判据是重叠 + 浮层身份，
+  不是谁在上。
+- 浮层身份用祖先链上的数值 z 认。实测：官方设置那层 `*_overlay`(position:fixed, z:1000) >
+  `*_mask`(rgba(0,0,0,.5))；**没弹层时地球身下的侧栏链全是 auto**（`_9lTDKa_*` / `BynINW_frame` /
+  `root`），所以普通内容永远命中不了这条判据 —— 不需要任何阈值。
+- 账号菜单是公共 Menu：其 portal 实测 `position:fixed; z-index:1100`（backdrop z:1000）⇒ 命中判据，
+  地球会沉到 1099。
+- `applyFabYield` → `applyYield(el, ghost)`；`syncFabYield()` 现在**也管 `.bl-panel`**（观察窗太大，
+  磨砂只会糊成一整块 ⇒ 只沉不糊）。
+- 设置页按底图工坊那套重排：标题 + 小字说明 → 状态卡（灯 / 状态 / 打开观察窗）→
+  「观察窗形态 / 面板尺寸」卡 → 「启动与连接」「接管你自己的浏览器」两个 `<details>` 折叠组
+  → 注脚。颜色全走 `--dsw-alias-*` 主题 token，浅色/深色都不用另写。功能与接口一字未改。
+  （踩坑：状态卡的 `.bl-status` 与**面板标题行**那条黄字状态位撞名，改叫 `.bl-hero*`。）
+
+**验证**：
+- `node --check client.js` 通过。注意语法检查**抓不到**改名后的悬空调用 —— 本轮 `applyFabYield`
+  漏改一处，600ms ticker 每轮 ReferenceError、catch 又把地球 `display:none` 藏掉；是靠读
+  `dataset.blYield` / `getComputedStyle().display` 抓到的。
+- 浏览器端实测：设置弹层打开（停在「通用设置」，即本插件分区未挂载）时地球与观察窗均
+  `zIndex=999` / `blYield=sunk`；Esc 关闭后双双回到 `zIndex=''` / `blYield=''`。
+- 合成弹层回归：往 body 塞一块 220×160、`z-index:1500` 的浮层叠在地球上 → 地球立刻 `1499/sunk`，
+  移除后回到 `''`（这条就是在补"小弹层也要躲"）。
+- 未跑：`npm test` 那套 verify-*（本轮只改 client 半的让位与设置页 DOM，没碰 host 路由）。
+  **待用户复核**：账号菜单那条走的是静态 CSS 证据（公共 Menu portal z:1100），没能在本机实开菜单
+  —— 插件自带 Chrome 是干净 profile、没登录 DeepSeek 账号，侧栏底部渲染成「设置」而非账号入口。
+
 ## 2026-09-23 · 本地维护：桥端口漂移修复（Chrome ERR_CONNECTION_REFUSED）
 
 **现场**：Chrome 扩展错误页报 `background.js` 连 `ws://127.0.0.1:9760/bl/bridge` 被拒。
