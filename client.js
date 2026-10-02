@@ -36,7 +36,7 @@ window.__ModuleLoader__.load({
     // 于是所有 `border-radius:50%` 的真圆都会被画成圆角方块（按钮 hover 底衬尤其明显）。
     // 宿主自己的圆形控件都写 `corner-shape:round` 豁免，这里照做；旧内核会自动忽略该属性。
     var CSS = [
-      '.bl-fab{width:22px;height:22px;border-radius:50%;corner-shape:round;border:none;background:transparent;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;position:relative;font-size:15px;line-height:1;padding:0;flex:none;transition:opacity .25s ease}',
+      '.bl-fab{width:22px;height:22px;border-radius:50%;corner-shape:round;border:none;background:transparent;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;position:relative;font-size:15px;line-height:1;padding:0;flex:none;transition:opacity .12s ease}',
       '.bl-fab:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.16))}',
       '.bl-fab-dot{position:absolute;right:0;top:0;width:5px;height:5px;border-radius:50%;corner-shape:round;background:#3fb96f;box-shadow:0 0 4px rgba(63,185,111,.8)}',
       '.bl-fab-dot.bl-off{background:#b9bfc9;box-shadow:none}',
@@ -46,7 +46,10 @@ window.__ModuleLoader__.load({
       // 重新栅格化（backdrop-filter 还会就地立一个 backdrop root），观感就是整块发糊。
       // 而且它和需求相反："想让开"要的是躲开，不是把自己糊在人家脸上。现在改成**淡出**：
       // 既不遮挡、也不糊任何东西，弹层一走立刻回来。
-      '.bl-fab-hidden{opacity:0;pointer-events:none}',
+      // 时间：`.bl-fab` 那条 transition 管的是"回来"（.12s 淡入）；**藏起来必须立刻**——
+      // 用户 2026-10-02 说"仔细看还是慢一点"，那 .25s 的淡出就是慢的那一节，所以 hidden 态
+      // 显式 `transition:none`（瞬时归零），不然遮挡会拖到 250ms 后才真正结束。
+      '.bl-fab-hidden{opacity:0;pointer-events:none;transition:none}',
       // 兜底球的层级也走样式表（不写行内）：让位时把 style.zIndex 置空才能回到基值
       '.bl-fab-fallback{position:fixed;left:18px;bottom:18px;z-index:2147483450;box-shadow:0 6px 20px rgba(0,0,0,.22)}',
       // 面板几何全部走**视口百分比**（v0.12.0）：宽/高/宽屏宽/边距都是"屏幕的多少"，
@@ -874,21 +877,23 @@ window.__ModuleLoader__.load({
     // ------------------------------------------------------------------ 让位的响应速度
     // 几何 ticker 是 600ms 的（它要量宝珠、改 CSS 变量，贵），但让位靠它就跟不上手速：
     // 用户 2026-10-02 报"延迟沉底"。弹层几乎都是"点一下才出来"的，所以：
-    //   ① 点下去（click/pointerdown，捕获相）就先补测 0/60/180ms 三拍 —— 覆盖菜单挂载
-    //      和它自己那两帧入场动画；
-    //   ② 让位另开一条 250ms 的轮询（只做让位，不碰几何），兜住 hover 打开 / 程序化打开的弹层。
+    //   ① 点下去（click/pointerdown，捕获相）立刻补测，且**用 rAF 再补一次** ——
+    //      click 处理函数里同步测那次，React 还没把菜单渲染出来；rAF 落在 React 提交之后，
+    //      所以这一次通常就是命中的那一次（约 16ms）。再补 40/110ms 兜住菜单自己的入场动画。
+    //   ② 让位另开一条 150ms 的轮询（只做让位，不碰几何），兜住 hover 打开 / 程序化打开的弹层。
     // 两条都比"等下一个 600ms 几何 tick"快，代价是每秒多几次 elementsFromPoint。
     function nudgeYield() {
       syncFabYield()
-      setTimeout(syncFabYield, 60)
-      setTimeout(syncFabYield, 180)
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(function () { syncFabYield() })
+      setTimeout(syncFabYield, 40)
+      setTimeout(syncFabYield, 110)
     }
     function startYieldTicker() {
       if (startYieldTicker.done) return
       startYieldTicker.done = true
       document.addEventListener('click', nudgeYield, true)
       document.addEventListener('pointerdown', nudgeYield, true)
-      var t = setInterval(function () { if (!document.hidden) syncFabYield() }, 250)
+      var t = setInterval(function () { if (!document.hidden) syncFabYield() }, 150)
       window.addEventListener('resize', syncFabYield)
       void t
     }
