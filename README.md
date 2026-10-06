@@ -48,7 +48,7 @@ npm run audit:check            # 只校验留痕哈希链（= node tools/verify-
 **出网边界**：只有 `npm ci` / `npm install` 那一步出网（按 `package-lock.json` 装 devDependencies）。
 `npm test` 本身**不出网** —— 不做真实下载、不调真实模型、不起真浏览器、不读本机 DSH 安装目录。
 
-`tools/run-all.mjs` 把 10 项语法门禁（`node --check`）和 16 套离线测试都跑完再汇总（原来的 `npm test` 是 `&&` 串，
+`tools/run-all.mjs` 把 10 项语法门禁（`node --check`）和 17 套离线测试都跑完再汇总（原来的 `npm test` 是 `&&` 串，
 第一套一失败后面的就不跑了），任一套非 0 退出 ⇒ `npm test` 退出码 1 ⇒ CI 变红。
 CI 用 Node **22 / 24** 两档矩阵、windows-latest。
 

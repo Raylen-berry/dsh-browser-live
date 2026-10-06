@@ -51,6 +51,8 @@ const SUITES = [
   // 刻意不自证 —— 用 zlib 手工构造 PNG（不经本模块的 encode），并覆盖四种行过滤器；
   // 不支持的格式必须**明确报错**而不是静默给错像素（视觉回归最怕"比过了但没比"）。
   'tools/verify-pixdiff.mjs',     // 30 项
+  'tools/verify-pixdiff-scale.mjs', // 19 项
+  // 跨 DPI 归一化：同一画面按不同倍率渲染应判相同，而真实回归仍要抓得到
 ]
 
 const EXCLUDED = [

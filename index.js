@@ -44,7 +44,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { BridgeServer, BRIDGE_FILE, DEFAULT_BRIDGE_PORT } from './bridge.js'
 import { createAudit, trim as auditTrim, redactAuditArgs } from './audit.js'
 // 像素比对底座（自研零依赖 PNG 解码，见 pixdiff.js 顶部说明）
-import { decodePng, encodePng, comparePixels, comparePng, readPngHeader } from './pixdiff.js'
+import { encodePng, comparePngEither } from './pixdiff.js'
 // 页面内注入函数（用 fn.toString() 注入，所以必须是普通函数、不能引用模块作用域的东西）
 import {
   READ_FN, SCRAPE_FN, SEARCH_FN, CHALLENGE_FN, SNAPSHOT_FN, ACTIONABLE_FN, READBACK_FN,
@@ -2655,11 +2655,14 @@ function buildTools(t) {
       }
 
       const basePng = readFileSync(baseFile)
-      const a = decodePng(basePng), b = decodePng(shot)
-      const cmp = comparePixels(a, b, {
+      // 尺寸不同时自动归一到同一规范尺寸（跨 DPI / 跨窗口尺寸场景）；同尺寸则精确比。
+      // 为什么默认开：截图是**设备像素**，同一页面在 dpr=1.16 与 1.0 下宽高差十几个百分点，
+      // 不归一化就只能报尺寸不符、比对失效。真实回归在归一化后仍然抓得到（见 verify-pixdiff-scale）。
+      const cmp = comparePngEither(basePng, shot, {
         tolerance: Number.isFinite(args.tolerance) ? args.tolerance : 0,
         maxDiffRatio: Number.isFinite(args.maxDiffRatio) ? args.maxDiffRatio : 0,
         ignoreAlpha: args.ignoreAlpha === true,
+        allowScale: args.allowScale !== false,
       })
 
       const outFile = args.out ? (path.isAbsolute(args.out) ? args.out : path.join(SHOTS_DIR(), args.out))
@@ -2676,15 +2679,16 @@ function buildTools(t) {
         same: cmp.same,
         sizeMismatch: cmp.sizeMismatch || false,
         baseline: baseFile,
-        baselineSize: { width: a.width, height: a.height },
-        currentSize: { width: b.width, height: b.height },
+        baselineSize: cmp.scaled ? cmp.scaledFrom.a : { width: cmp.width, height: cmp.height },
+        currentSize: cmp.scaled ? cmp.scaledFrom.b : { width: cmp.width, height: cmp.height },
+        ...(cmp.scaled ? { scaled: true, normalizedTo: cmp.normalizedTo, note: '两边尺寸不同，已归一到 ' + cmp.normalizedTo.width + '×' + cmp.normalizedTo.height + ' 再比（跨 DPI/跨窗口尺寸）' } : {}),
         diffPixels: cmp.diff,
         totalPixels: cmp.total,
         diffRatio: Number(cmp.ratio.toFixed(6)),
         maxChannelDelta: cmp.maxChannelDelta,
         meanChannelDelta: cmp.sizeMismatch ? null : Number(cmp.meanChannelDelta.toFixed(4)),
         ...(wroteDiff ? { diffImage: wroteDiff } : {}),
-        ...(cmp.sizeMismatch ? { error: '尺寸不一致：基准 ' + a.width + '×' + a.height + ' vs 当前 ' + b.width + '×' + b.height + '。窗口尺寸/缩放变了，不是视觉回归。' } : {}),
+        ...(cmp.sizeMismatch ? { error: '尺寸不一致且未归一（allowScale:false）' } : {}),
       }
     },
   }))
@@ -2698,6 +2702,7 @@ function buildTools(t) {
       tolerance: { type: 'number', description: '每通道允许的差（默认 0）' },
       maxDiffRatio: { type: 'number', description: '允许的差异像素比例上限（默认 0）' },
       ignoreAlpha: { type: 'boolean', description: 'true=忽略 alpha' },
+      allowScale: { type: 'boolean', description: '尺寸不同时是否归一到同一尺寸再比（默认 true，跨 DPI/跨窗口尺寸场景需要）。false 则尺寸不同直接报 sizeMismatch' },
       out: { type: 'string', description: '差异图输出路径（可选；不给就不写盘）' },
     },
     async execute(args) {
@@ -2707,10 +2712,11 @@ function buildTools(t) {
       const pb = path.isAbsolute(fb) ? fb : path.join(SHOTS_DIR(), fb)
       if (!existsSync(pa)) throw new Error('找不到第一张图：' + pa)
       if (!existsSync(pb)) throw new Error('找不到第二张图：' + pb)
-      const cmp = comparePng(readFileSync(pa), readFileSync(pb), {
+      const cmp = comparePngEither(readFileSync(pa), readFileSync(pb), {
         tolerance: Number.isFinite(args.tolerance) ? args.tolerance : 0,
         maxDiffRatio: Number.isFinite(args.maxDiffRatio) ? args.maxDiffRatio : 0,
         ignoreAlpha: args.ignoreAlpha === true,
+        allowScale: args.allowScale !== false,
       })
       let wrote = null
       if (args.out && !cmp.sizeMismatch && cmp.diffImage) {
@@ -2722,7 +2728,8 @@ function buildTools(t) {
       return {
         ok: true, same: cmp.same, sizeMismatch: cmp.sizeMismatch || false,
         a: pa, b: pb,
-        ...(cmp.sizeMismatch ? { error: '尺寸不一致：' + cmp.widthA + '×' + cmp.heightA + ' vs ' + cmp.widthB + '×' + cmp.heightB } : {
+        ...(cmp.scaled ? { scaled: true, scaledFrom: cmp.scaledFrom, normalizedTo: cmp.normalizedTo, note: '两边尺寸不同，已归一到 ' + cmp.normalizedTo.width + '×' + cmp.normalizedTo.height + ' 再比（跨 DPI/跨窗口尺寸）' } : {}),
+        ...(cmp.sizeMismatch ? { error: '尺寸不一致且未归一（allowScale:false）' } : {
           width: cmp.width, height: cmp.height,
           diffPixels: cmp.diff, totalPixels: cmp.total, diffRatio: Number(cmp.ratio.toFixed(6)),
           maxChannelDelta: cmp.maxChannelDelta, meanChannelDelta: Number(cmp.meanChannelDelta.toFixed(4)),

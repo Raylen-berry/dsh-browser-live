@@ -187,3 +187,76 @@ export function comparePixels(a, b, { tolerance = 0, ignoreAlpha = false, maxDif
 export function comparePng(b1, b2, opts) {
   return comparePixels(decodePng(b1), decodePng(b2), opts)
 }
+
+// ---------------------------------------------------------------- 缩放：跨 DPI 比对
+
+/**
+ * 把图缩放到目标尺寸（双线性插值）。
+ *
+ * 为什么需要：截图是**设备像素**，同一页面在 devicePixelRatio=1 与 1.25 下宽高差 25%
+ * （实测本机 dpr=1.1667 ⇒ 1418 CSS px 的视口截出 1654 px）。不归一化的话，跨机器/跨 DPI
+ * 的基准直接判 sizeMismatch，比对无效。
+ *
+ * 为什么是双线性而不是最近邻：最近邻在缩放时会丢细线、产生锯齿，让"其实没变"的两张图
+ * 出现成片差异。双线性对轻微缩放更宽容，但**对真实回归仍然敏感**（整块颜色变了照样抓得到）。
+ * 这是视觉回归工具，不是图像处理库 —— 够用即可，不引依赖。
+ */
+export function resizePixels(img, targetW, targetH) {
+  const { width: sw, height: sh, data: src } = img
+  if (sw === targetW && sh === targetH) return img
+  const out = Buffer.alloc(targetW * targetH * 4)
+  const xRatio = sw / targetW
+  const yRatio = sh / targetH
+  for (let y = 0; y < targetH; y++) {
+    // 双线性：取源图上的浮点位置，再对 4 个邻居加权
+    const sy = Math.min(sh - 1, Math.max(0, (y + 0.5) * yRatio - 0.5))
+    const y0 = Math.floor(sy), y1 = Math.min(sh - 1, y0 + 1)
+    const fy = sy - y0
+    for (let x = 0; x < targetW; x++) {
+      const sx = Math.min(sw - 1, Math.max(0, (x + 0.5) * xRatio - 0.5))
+      const x0 = Math.floor(sx), x1 = Math.min(sw - 1, x0 + 1)
+      const fx = sx - x0
+      const d = (y * targetW + x) * 4
+      for (let c = 0; c < 4; c++) {
+        const p00 = src[(y0 * sw + x0) * 4 + c]
+        const p10 = src[(y0 * sw + x1) * 4 + c]
+        const p01 = src[(y1 * sw + x0) * 4 + c]
+        const p11 = src[(y1 * sw + x1) * 4 + c]
+        const top = p00 + (p10 - p00) * fx
+        const bot = p01 + (p11 - p01) * fx
+        out[d + c] = Math.round(top + (bot - top) * fy)
+      }
+    }
+  }
+  return { width: targetW, height: targetH, channels: 4, data: out }
+}
+
+/**
+ * 跨 DPI 比对：把两张图都归一到**同一个规范尺寸**再比。
+ *
+ * 归一目标取两图尺寸的较大者（避免把细节缩掉）。若两图尺寸本来就相同，退化为普通比对。
+ * 返回里带上 scaledFrom，让调用方知道"这次比的是缩放后的图"，不会被误当成原尺寸结论。
+ */
+export function comparePngScaled(b1, b2, opts = {}) {
+  const a = decodePng(b1), b = decodePng(b2)
+  if (a.width === b.width && a.height === b.height) {
+    const r = comparePixels(a, b, opts)
+    return { ...r, scaled: false }
+  }
+  const W = Math.max(a.width, b.width)
+  const H = Math.max(a.height, b.height)
+  const ra = resizePixels(a, W, H)
+  const rb = resizePixels(b, W, H)
+  const r = comparePixels(ra, rb, opts)
+  return {
+    ...r,
+    scaled: true,
+    scaledFrom: { a: { width: a.width, height: a.height }, b: { width: b.width, height: b.height } },
+    normalizedTo: { width: W, height: H },
+  }
+}
+
+/** 便捷入口：吃两个 PNG 文件 Buffer，尺寸不同时自动归一（跨 DPI 场景用这个）。 */
+export function comparePngEither(b1, b2, opts = {}) {
+  return opts.allowScale === false ? comparePng(b1, b2, opts) : comparePngScaled(b1, b2, opts)
+}

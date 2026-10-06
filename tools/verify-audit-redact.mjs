@@ -23,6 +23,14 @@ const ok = (cond, label, extra) => {
   if (cond) { pass++; console.log('  ok  ' + label) }
   else { fails.push(label + (extra !== undefined ? ' → ' + JSON.stringify(extra) : '')); console.log('  FAIL ' + label + (extra !== undefined ? ' → ' + JSON.stringify(extra) : '')) }
 }
+// 与 audit.js 的 fileFor 同口径：**本地**日期，不是 UTC。
+// 踩过的坑：这里原来用 new Date().toISOString().slice(0,10)（UTC），而 audit.js 用
+// getFullYear/getMonth/getDate（本地）。本地 10-07 而 UTC 还停在 10-06 时（跨零点那几个小时），
+// 两边算出不同文件名 ⇒ readFileSync ENOENT ⇒ 整套挂。跨零点必现，与代码改动无关。
+function localDay(d = new Date()) {
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
 const sha12 = (s) => createHash('sha256').update(String(s), 'utf8').digest('hex').slice(0, 12)
 
 // 虚构密码：绝不用真口令。故意用一个别处不会出现的串，才能断言"它不出现在最终 JSON 里"。
@@ -204,7 +212,7 @@ if (typeof withAudit === 'function') {
   })
   const outReal = await fakeType.execute({ ref: 'e5', text: PW }, {})
   ok(outReal && outReal.field && outReal.field.type === 'password', '包装器不改变工具返回值（结果形状原样透出）', outReal && outReal.field)
-  const onDisk2 = readFileSync(path.join(home, 'dsh-browser-live', 'audit', new Date().toISOString().slice(0, 10) + '.jsonl'), 'utf8')
+  const onDisk2 = readFileSync(path.join(home, 'dsh-browser-live', 'audit', localDay() + '.jsonl'), 'utf8')
   const last = JSON.parse(onDisk2.trim().split('\n').pop())
   ok(last.tool === 'browser_type', '包装器落盘的是 browser_type 那条', last.tool)
   ok(!last.args.includes(PW), '真包装器落盘后 args 里**没有口令明文**', last.args.slice(0, 160))
@@ -217,18 +225,18 @@ if (typeof withAudit === 'function') {
   // 普通输入走真包装器 ⇒ 审计里必须能看出打了什么
   const fakePlain = withAudit({ name: 'browser_type', async execute(a) { return typeOut('text', String(a.text).length) } })
   await fakePlain.execute({ ref: 'e6', text: '普通文本-keep' }, {})
-  const d3 = JSON.parse(readFileSync(path.join(home, 'dsh-browser-live', 'audit', new Date().toISOString().slice(0, 10) + '.jsonl'), 'utf8').trim().split('\n').pop())
+  const d3 = JSON.parse(readFileSync(path.join(home, 'dsh-browser-live', 'audit', localDay() + '.jsonl'), 'utf8').trim().split('\n').pop())
   ok(d3.args.includes('普通文本-keep'), '普通输入走真包装器 ⇒ 审计里看得到原文（没被修废）', d3.args.slice(0, 120))
 
   // 工具失败时也要留一条且不含明文
   const fakeFail = withAudit({ name: 'browser_type', async execute() { const e = new Error('回读失败：目标元素不在了'); e.fieldType = 'password'; throw e } })
   let thrown = null
   try { await fakeFail.execute({ selector: '#pw', text: PW }, {}) } catch (e) { thrown = e }
-  const d4 = JSON.parse(readFileSync(path.join(home, 'dsh-browser-live', 'audit', new Date().toISOString().slice(0, 10) + '.jsonl'), 'utf8').trim().split('\n').pop())
+  const d4 = JSON.parse(readFileSync(path.join(home, 'dsh-browser-live', 'audit', localDay() + '.jsonl'), 'utf8').trim().split('\n').pop())
   ok(!!thrown && d4.ok === false && d4.err.includes('回读失败'), '工具抛错时错误照旧抛给调用方，且留了一条 ok:false 的记录', d4.err)
   ok(!d4.args.includes(PW), '失败记录里同样没有口令明文（不会"一失败就漏"）', d4.args.slice(0, 160))
   // 真包装器生成的留痕链必须仍然自洽
-  ok(verifyChain(path.join(home, 'dsh-browser-live', 'audit', new Date().toISOString().slice(0, 10) + '.jsonl')).ok === true, '真包装器写出的留痕链自洽', null)
+  ok(verifyChain(path.join(home, 'dsh-browser-live', 'audit', localDay() + '.jsonl')).ok === true, '真包装器写出的留痕链自洽', null)
 }
 try { rmSync(home, { recursive: true, force: true }) } catch {}
 
