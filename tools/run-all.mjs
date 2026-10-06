@@ -21,7 +21,7 @@ const LIST_ONLY = process.argv.includes('--list')
 
 // ---- 仓库配置 -------------------------------------------------------------
 const CHECKS = [                        // node --check（纯语法门禁，原 npm test 里已有的那 8 项 + view-page.js）
-  'index.js', 'page-read.js', 'view-page.js', 'audit.js', 'bridge.js', 'client.js',
+  'index.js', 'page-read.js', 'view-page.js', 'audit.js', 'bridge.js', 'client.js', 'pixdiff.js',
   'extension/background.js', 'extension/sid.js', 'extension/popup.js',
 ]
 
@@ -47,6 +47,10 @@ const SUITES = [
   'tools/verify-launch.mjs',        // 24 项；其中 4 项窗口自查依赖 loadWs 的产品缺陷修复（见 index.js）
   // v0.16.0 截图自动回收：shots/ 留最近 200 张且 7 天内，其余移入 recycle（只移不删）
   'tools/verify-shots-recycle.mjs',
+  // v0.17.0 像素比对底座（pixdiff.js）：零依赖 PNG 解码 + 逐像素比对。
+  // 刻意不自证 —— 用 zlib 手工构造 PNG（不经本模块的 encode），并覆盖四种行过滤器；
+  // 不支持的格式必须**明确报错**而不是静默给错像素（视觉回归最怕"比过了但没比"）。
+  'tools/verify-pixdiff.mjs',     // 30 项
 ]
 
 const EXCLUDED = [
@@ -55,6 +59,10 @@ const EXCLUDED = [
     '没 Chromium 时才走"预期失败"那一支。CI runner（windows-latest）自带 Edge ⇒ 会拉起真浏览器，违反"测试期不出网/不起真浏览器"。'],
   ['tools/verify-page-fns.mjs', '会拉无头 Chromium（Edge/Chrome）做 CDP 实测 —— 测试期不许起真浏览器、不许做真实下载'],
   ['tools/verify-web-tools.mjs', '同样会拉真 Chromium 做 CDP 实测 —— 同上'],
+  ['tools/probe-real-shot.mjs',
+    '探针：拿**一张已存在的浏览器截图**（browser_screenshot 的产物）跑 PNG 解码与像素比对，' +
+    '验证解码器在真实浏览器输出上成立。必须给截图路径参数，CI 里没有截图 ⇒ 不自动跑。' +
+    '手工跑：node tools/probe-real-shot.mjs "$DSH_HOME/dsh-browser-live/shots/<某张>.png"'],
 ]
 
 const ENV = {}

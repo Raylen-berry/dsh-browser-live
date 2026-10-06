@@ -10,7 +10,7 @@ v0.5.0 起还可选**接管你自己的日常浏览器**（装一个 MV3 扩展�
 ## 它解决什么
 
 DSH 内置的 web_search/web_fetch 只能"读"；凡是**必须真浏览器**的活（登录态、动态渲染、表单、验证码、
-需真人会话的站点）就干不了。装上本插件后，agent 获得 21 个 `browser_*` 工具，能真正在页面里
+需真人会话的站点）就干不了。装上本插件后，agent 获得 23 个 `browser_*` 工具，能真正在页面里
 点击、输入、提交、滚动、取快照；你在观察窗里实时看到每一步，卡在验证码时点进面板亲手代打，
 完事再把鼠标还给 agent。
 
@@ -18,7 +18,7 @@ DSH 内置的 web_search/web_fetch 只能"读"；凡是**必须真浏览器**的
 
 | 文件 | 职责 |
 |---|---|
-| `index.js` | Host（ESM）：拉起/接管 Chrome → CDP；注册 21 个 `browser_*` 工具；`/bl/*` 观察窗后端（SSE 帧流 + 输入回传 + 设置/代理 + 下载取回 + `/bl/view` 独立网页 + `/bl/bridge` 桥状态） |
+| `index.js` | Host（ESM）：拉起/接管 Chrome → CDP；注册 23 个 `browser_*` 工具；`/bl/*` 观察窗后端（SSE 帧流 + 输入回传 + 设置/代理 + 下载取回 + `/bl/view` 独立网页 + `/bl/bridge` 桥状态） |
 | `bridge.js` | 用户浏览器桥（P0）：127.0.0.1 WS 服务端 + token 握手 + 与 `Cdp` 同形的 `send/on/alive/close` |
 | `extension/` | Chrome MV3 扩展（P0）：service worker 当"反向 CDP 客户端"（`chrome.debugger`），弹窗逐站点授权；见 `extension/README.md` |
 | `client.js` | Client 单文件：侧栏 🌐 按钮（无 slots 环境退化为自建浮球；与 bg-atelier 宝珠叠列共存）+ 观察窗（实时帧、标签条、agent 动作条、鼠标键盘接管、FPS/画质、下载取回；内嵌面板可拖动贴边，或切成独立网页） |
@@ -48,7 +48,7 @@ npm run audit:check            # 只校验留痕哈希链（= node tools/verify-
 **出网边界**：只有 `npm ci` / `npm install` 那一步出网（按 `package-lock.json` 装 devDependencies）。
 `npm test` 本身**不出网** —— 不做真实下载、不调真实模型、不起真浏览器、不读本机 DSH 安装目录。
 
-`tools/run-all.mjs` 把 9 项语法门禁（`node --check`）和 15 套离线测试都跑完再汇总（原来的 `npm test` 是 `&&` 串，
+`tools/run-all.mjs` 把 10 项语法门禁（`node --check`）和 16 套离线测试都跑完再汇总（原来的 `npm test` 是 `&&` 串，
 第一套一失败后面的就不跑了），任一套非 0 退出 ⇒ `npm test` 退出码 1 ⇒ CI 变红。
 CI 用 Node **22 / 24** 两档矩阵、windows-latest。
 
@@ -310,7 +310,7 @@ browser_search({ query: '关键词', engineSpec: {
   ref 与状态标记 → **故障处置表** → 读/抓/搜的用法 → 人机验证纪律 → 反模式清单 → 4 个现成剧本 → 验收口径）。
 - DSH 的技能发现**不会**自动扫插件包里的 `skills/`，所以 `index.js` 自己调 `skills.register` 注册
   （`POST /bl/skills/reload` 可免重启重扫新增技能）。技能真正常驻的只有 name + description，
-  正文在 agent 调 `skill` 时才进上下文 —— **21 个工具不该配一份常驻长文**。
+  正文在 agent 调 `skill` 时才进上下文 —— **23 个工具不该配一份常驻长文**。
 - 人机验证、被遮挡、ref 失效这些"卡住"的情形，都做成**工具返回值里的一等公民**
   （`challenge` / `flags.covered-by` / 确定性错误原因），而不是让 agent 自己猜。
 

@@ -1,6 +1,6 @@
 {
   "name": "dsh-browser-live",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "description": "看得见的 Agent 浏览器（自研，零外部依赖）：21 个 browser_* 工具直接驱动本机 Chrome/Edge（CDP，含拟人鼠标轨迹），实时观察窗支持内嵌面板与独立网页（/bl/view，可丢副屏/全屏）两种形态、鼠标键盘接管，可配代理与额外启动参数。网页理解三件套：browser_read（正文四级降级 + Markdown + 段落感知续读）、browser_scrape（item+fields 结构化抓取）、browser_search（真实浏览器里搜；引擎无关：预设 bing/baidu/ddg + engineSpec 自带任意搜索页，空结果按病因四态分诊）。完整调用方案做成技能 skills/browser-automation（由 index.js 注册，POST /bl/skills/reload 免重启重扫）。可选接管你日常浏览器：MV3 扩展 + 本地 WS 桥，逐站点授权、默认只读，打开「允许操作」后才可点击/打字；Chrome 与 Edge 可同时接入，每次调用用 use 指定；首选起不来自动降级并补试 --in-process-gpu；只允许关闭 agent 自己打开的标签页，你手动开的任何情况下不动。agent 的每一步落盘留痕（audit/ 一天一个 append-only JSONL + 哈希链，敏感输入脱敏，verify-audit-chain 验链）。登录态持久化在 $DSH_HOME/dsh-browser-live。换台机器请注意：接管「你的日常浏览器」必须人工装扩展 + 粘 token + 逐站点授权，agent 只能把现场备好（browser_ext_setup）；「插件自带实例」这一档免授权、全自动。详见 README「换台机器：可迁移性与必须手动的步骤」。设计灵感来自 dsh-ego-browser (MIT)，蒸馏来源与许可全文见 NOTICE。",
   "keywords": [
     "dsh",
@@ -24,6 +24,7 @@
     "audit.js",
     "bridge.js",
     "client.js",
+    "pixdiff.js",
     "extension",
     "tools",
     "docs",

@@ -43,6 +43,8 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { BridgeServer, BRIDGE_FILE, DEFAULT_BRIDGE_PORT } from './bridge.js'
 import { createAudit, trim as auditTrim, redactAuditArgs } from './audit.js'
+// 像素比对底座（自研零依赖 PNG 解码，见 pixdiff.js 顶部说明）
+import { decodePng, encodePng, comparePixels, comparePng, readPngHeader } from './pixdiff.js'
 // 页面内注入函数（用 fn.toString() 注入，所以必须是普通函数、不能引用模块作用域的东西）
 import {
   READ_FN, SCRAPE_FN, SEARCH_FN, CHALLENGE_FN, SNAPSHOT_FN, ACTIONABLE_FN, READBACK_FN,
@@ -2619,6 +2621,114 @@ function buildTools(t) {
       // 写完顺手回收超额旧截图（同步、毫秒级，几百张小 PNG 基本零开销）
       const recycle = trimShots()
       return { ok: true, path: file, bytes: buf.length, ...(recycle.moved ? { recycled: recycle.moved } : {}) }
+    },
+  }))
+
+  tools.push(t({
+    name: 'browser_pixel_diff',
+    description: '像素比对（视觉回归）：把当前页面截图与一张基准 PNG 逐像素比，返回差异统计与差异图路径。用于"改了 CSS 但不确定视觉有没有变"的回归——比人眼看截图可靠。基准图不存在时会存下当前截图当基准并返回 baselineCreated。',
+    parameters: {
+      baseline: { type: 'string', description: '基准 PNG 路径（绝对或相对 shots 目录）。不存在则把当前截图存成它' },
+      out: { type: 'string', description: '差异图输出路径（可选，默认与基准同目录 <基准名>.diff.png）' },
+      tolerance: { type: 'number', description: '每个颜色通道允许的差（0-255，默认 0 = 逐字节相同）' },
+      maxDiffRatio: { type: 'number', description: '允许的差异像素比例上限（0-1，默认 0 = 必须完全一致）' },
+      ignoreAlpha: { type: 'boolean', description: 'true=忽略 alpha 通道差异' },
+      full: { type: 'boolean', description: 'true=整页截图再比，默认只比可视区' },
+    },
+    async execute(args) {
+      const tab = await selectedTab()
+      const r = await browser.cdp.send('Page.captureScreenshot', {
+        format: 'png',
+        ...(args.full ? { captureBeyondViewport: true } : {}),
+      }, tab.sessionId, 20000)
+      const shot = Buffer.from(r.data, 'base64')
+
+      // 基准解析：绝对路径 / shots 目录下的名字 / 直接给的名字
+      const raw = String(args.baseline || '').trim()
+      if (!raw) throw new Error('baseline 必填：给一个基准 PNG 路径')
+      const baseFile = path.isAbsolute(raw) ? raw : path.join(SHOTS_DIR(), raw)
+
+      if (!existsSync(baseFile)) {
+        mkdirSync(path.dirname(baseFile), { recursive: true })
+        writeFileSync(baseFile, shot)
+        return { ok: true, baselineCreated: true, baseline: baseFile, bytes: shot.length, hint: '基准已存下；下次同一命令就是回归比对' }
+      }
+
+      const basePng = readFileSync(baseFile)
+      const a = decodePng(basePng), b = decodePng(shot)
+      const cmp = comparePixels(a, b, {
+        tolerance: Number.isFinite(args.tolerance) ? args.tolerance : 0,
+        maxDiffRatio: Number.isFinite(args.maxDiffRatio) ? args.maxDiffRatio : 0,
+        ignoreAlpha: args.ignoreAlpha === true,
+      })
+
+      const outFile = args.out ? (path.isAbsolute(args.out) ? args.out : path.join(SHOTS_DIR(), args.out))
+        : baseFile.replace(/\.png$/i, '') + '.diff.png'
+      let wroteDiff = null
+      if (!cmp.sizeMismatch && cmp.diffImage) {
+        mkdirSync(path.dirname(outFile), { recursive: true })
+        writeFileSync(outFile, encodePng(cmp.diffImage))
+        wroteDiff = outFile
+      }
+
+      return {
+        ok: true,
+        same: cmp.same,
+        sizeMismatch: cmp.sizeMismatch || false,
+        baseline: baseFile,
+        baselineSize: { width: a.width, height: a.height },
+        currentSize: { width: b.width, height: b.height },
+        diffPixels: cmp.diff,
+        totalPixels: cmp.total,
+        diffRatio: Number(cmp.ratio.toFixed(6)),
+        maxChannelDelta: cmp.maxChannelDelta,
+        meanChannelDelta: cmp.sizeMismatch ? null : Number(cmp.meanChannelDelta.toFixed(4)),
+        ...(wroteDiff ? { diffImage: wroteDiff } : {}),
+        ...(cmp.sizeMismatch ? { error: '尺寸不一致：基准 ' + a.width + '×' + a.height + ' vs 当前 ' + b.width + '×' + b.height + '。窗口尺寸/缩放变了，不是视觉回归。' } : {}),
+      }
+    },
+  }))
+
+  tools.push(t({
+    name: 'browser_pixel_compare',
+    description: '像素比对（两张已存在的 PNG 文件，不截图）：给两个路径，返回差异统计与差异图。适合比"两次运行各自的截图"，或审核已有的基准图。',
+    parameters: {
+      a: { type: 'string', required: true, description: '第一张 PNG 路径' },
+      b: { type: 'string', required: true, description: '第二张 PNG 路径' },
+      tolerance: { type: 'number', description: '每通道允许的差（默认 0）' },
+      maxDiffRatio: { type: 'number', description: '允许的差异像素比例上限（默认 0）' },
+      ignoreAlpha: { type: 'boolean', description: 'true=忽略 alpha' },
+      out: { type: 'string', description: '差异图输出路径（可选；不给就不写盘）' },
+    },
+    async execute(args) {
+      const fa = String(args.a || ''), fb = String(args.b || '')
+      if (!fa || !fb) throw new Error('a 与 b 都必填')
+      const pa = path.isAbsolute(fa) ? fa : path.join(SHOTS_DIR(), fa)
+      const pb = path.isAbsolute(fb) ? fb : path.join(SHOTS_DIR(), fb)
+      if (!existsSync(pa)) throw new Error('找不到第一张图：' + pa)
+      if (!existsSync(pb)) throw new Error('找不到第二张图：' + pb)
+      const cmp = comparePng(readFileSync(pa), readFileSync(pb), {
+        tolerance: Number.isFinite(args.tolerance) ? args.tolerance : 0,
+        maxDiffRatio: Number.isFinite(args.maxDiffRatio) ? args.maxDiffRatio : 0,
+        ignoreAlpha: args.ignoreAlpha === true,
+      })
+      let wrote = null
+      if (args.out && !cmp.sizeMismatch && cmp.diffImage) {
+        const outFile = path.isAbsolute(args.out) ? args.out : path.join(SHOTS_DIR(), args.out)
+        mkdirSync(path.dirname(outFile), { recursive: true })
+        writeFileSync(outFile, encodePng(cmp.diffImage))
+        wrote = outFile
+      }
+      return {
+        ok: true, same: cmp.same, sizeMismatch: cmp.sizeMismatch || false,
+        a: pa, b: pb,
+        ...(cmp.sizeMismatch ? { error: '尺寸不一致：' + cmp.widthA + '×' + cmp.heightA + ' vs ' + cmp.widthB + '×' + cmp.heightB } : {
+          width: cmp.width, height: cmp.height,
+          diffPixels: cmp.diff, totalPixels: cmp.total, diffRatio: Number(cmp.ratio.toFixed(6)),
+          maxChannelDelta: cmp.maxChannelDelta, meanChannelDelta: Number(cmp.meanChannelDelta.toFixed(4)),
+        }),
+        ...(wrote ? { diffImage: wrote } : {}),
+      }
     },
   }))
 
