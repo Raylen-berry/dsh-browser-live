@@ -1,12 +1,14 @@
 # DSH Browser Bridge（MV3 扩展 · Chrome / Edge 各装一份）
 
+[插件首页](../README.md) · [新手接入指南](../docs/扩展.md) · [文档导航](../docs/README.md)
+
 让 DSH 的 `browser_*` 工具驱动**你日常那个浏览器里的标签页**（带你的登录态 / 代理 / 已装扩展），
 而不是插件自己拉起的隔离实例。
 
 > **v0.3.0（多浏览器）**：Chrome 与 Edge **可以各装一份、同时接入**，每条调用用 `use` 指定用哪台
 > （`browser_open {use:"edge"}`）。扩展装载时按 UA 嗅探自己的身份并在握手里上报，
 > 跨 WS 边界的 `sessionId` 一律带 `<浏览器>:` 前缀，桥靠前缀路由 —— 两台浏览器不会串台。
-> 协议见 [`../docs/MULTI-BROWSER.md`](../docs/MULTI-BROWSER.md)。
+> 协议见 [`../docs/MULTI-BROWSER.md`](../docs/历史/桥协议.md)。
 
 > **两层能力**
 > - **只读（默认）**：看（snapshot / text / screenshot / tabs）+ 导航。
